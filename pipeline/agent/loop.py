@@ -355,6 +355,13 @@ def _create_with_retries(
                 tools=tools,
                 output_config={"effort": effort},
                 thinking={"type": "adaptive"},
+                # Roll a breakpoint onto the last block of the newest turn so
+                # each request reuses the whole prior conversation. Without
+                # this only the system prompt caches, and an agentic loop
+                # re-reads its entire growing history at full price every turn
+                # — measured at ~11% cache hits and 3.3M uncached input tokens
+                # on a 48-iteration run.
+                cache_control={"type": "ephemeral"},
             ) as stream:
                 return stream.get_final_message()
         except (anthropic.RateLimitError, anthropic.InternalServerError,
