@@ -1,0 +1,132 @@
+# A promptset is the versioned input to a pipeline run.
+#
+#   id           becomes the app-id prefix and must be a slug — bump it (v2, v3,
+#                or a name like "games-v1") when you change the prompts, so old
+#                apps and reports stay addressable.
+#   defaults     per-run knobs; every one is overridable on the CLI.
+#   prompts[].id becomes the app directory and URL segment: apps/<set-id>-<id>/
+#
+# Drop a `system_prompt.md` next to this file to version the system instruction
+# with the prompts; without one, pipeline/agent/system_prompt.md is used.
+
+id: v1
+name: Baseline app set
+description: >
+  Six single-page React apps spanning interaction styles — canvas, forms,
+  data display, timing, drag-and-drop, and text — to exercise the pipeline
+  end to end.
+
+defaults:
+  model: claude-sonnet-5
+  effort: high
+  max_iterations: 60
+  web_search: true
+
+prompts:
+  - id: pomodoro
+    title: Pomodoro Timer
+    prompt: |
+      Build a Pomodoro timer.
+
+      A 25-minute focus interval followed by a 5-minute break, with a longer
+      15-minute break after every fourth focus interval. Show the remaining time
+      as both a readable countdown and a visual element that makes the elapsed
+      proportion obvious at a glance. Start, pause, and reset controls; the
+      timer keeps running correctly if the tab is backgrounded, so drive it from
+      wall-clock timestamps rather than counting interval ticks.
+
+      Let the user name what they are working on for the current interval, and
+      keep a session log of completed intervals with their labels, persisted to
+      localStorage. When an interval ends, make it unmistakable in the UI and
+      play a short tone generated with the Web Audio API.
+
+  - id: kanban
+    title: Kanban Board
+    prompt: |
+      Build a Kanban board with three columns: Todo, In Progress, Done.
+
+      Cards can be created, edited inline, deleted, and dragged between columns
+      and reordered within a column, using the native HTML drag-and-drop API.
+      Each card has a title, an optional description, and a priority of low,
+      medium, or high shown with a visual treatment rather than a text label.
+
+      The board persists to localStorage. Include a text filter that narrows
+      visible cards across all columns as the user types. Seed the board with
+      about eight realistic cards for a small software project so it looks alive
+      on first load.
+
+      Dragging must also be achievable from the keyboard — give each card a
+      "move to column" control that is reachable by tab.
+
+  - id: sorting-visualizer
+    title: Sorting Algorithm Visualizer
+    prompt: |
+      Build a sorting algorithm visualizer.
+
+      Animate bubble sort, insertion sort, merge sort, and quicksort over the
+      same randomly generated array, drawing the bars to a canvas. Distinguish
+      the elements currently being compared from those being swapped and from
+      the portion already in its final position.
+
+      Controls: choose the algorithm, regenerate the array, set array size
+      (roughly 10 to 200 elements), set animation speed, and play, pause, step
+      one operation, and reset. Display the running count of comparisons and
+      swaps, plus the algorithm's average and worst-case complexity.
+
+      Precompute the sequence of operations before animating rather than trying
+      to pause a recursive function mid-flight.
+
+  - id: markdown-editor
+    title: Markdown Editor
+    prompt: |
+      Build a split-pane markdown editor: raw markdown on the left, rendered
+      HTML on the right, updating as the user types.
+
+      Write the markdown parser yourself — do not add a dependency. Support
+      headings, bold, italic, inline code, fenced code blocks, links, images,
+      blockquotes, horizontal rules, and both ordered and unordered lists with
+      one level of nesting. Escape HTML in the input so the preview cannot
+      execute injected markup.
+
+      Add a toolbar that wraps the current selection in bold, italic, code, or a
+      link. Show a live word and character count. Persist the document to
+      localStorage, and provide a button that downloads it as a .md file.
+
+      On narrow screens the panes stack, with a toggle to switch between edit
+      and preview.
+
+  - id: weather-dashboard
+    title: Weather Dashboard
+    prompt: |
+      Build a weather dashboard for five cities on different continents.
+
+      There is no network access at runtime, so generate plausible synthetic
+      data deterministically in the client: for each city, a current reading and
+      a seven-day forecast whose temperatures reflect that city's real climate
+      and the current month. Seed the generator from the city name so the data
+      is stable across reloads.
+
+      Show current conditions prominently for the selected city, the seven-day
+      forecast as a row of cards, and a temperature trend chart drawn as inline
+      SVG — no charting library. Include a unit toggle between Celsius and
+      Fahrenheit that applies everywhere.
+
+      Give the page a visual treatment that responds to the selected city's
+      current condition, so a storm and a clear day do not look the same.
+
+  - id: expense-tracker
+    title: Expense Tracker
+    prompt: |
+      Build a personal expense tracker.
+
+      Add an expense with an amount, a category, a description, and a date;
+      edit and delete existing ones. Show the running total for the current
+      month, the breakdown by category as a donut chart drawn in inline SVG, and
+      the transaction list grouped by day, newest first.
+
+      Let the user set a monthly budget and show progress toward it, making an
+      overrun visually obvious. Filter the list by category and by date range.
+
+      Everything persists to localStorage. Seed with about twenty realistic
+      transactions across the current month so the charts are populated on first
+      load. Format currency correctly with Intl.NumberFormat.
