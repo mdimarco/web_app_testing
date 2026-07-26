@@ -1,7 +1,7 @@
 """Generate the HTML overview for a pipeline run.
 
-The report is written to `runs/<run_id>/report.html` with only relative links,
-so the same file works from the local gallery container and from GitHub Pages
+The report is written to `runs/<run_id>/report.html` with only relative links, so
+the same file works from the local gallery container and from the deployed site
 once `scripts/publish.sh` has assembled `site/`.
 """
 

@@ -29,8 +29,10 @@ APPS_DIR = REPO_ROOT / "apps"
 RUNS_DIR = REPO_ROOT / "runs"
 DEFAULT_SI = Path(__file__).with_name("system_prompt.md")
 
-# GitHub Pages serves this repo at https://<owner>.github.io/<repo>/
-DEFAULT_SITE_PREFIX = "/web_app_testing"
+# Vercel serves the assembled site/ at the domain root, so apps live at
+# /apps/<id>/ with no repo-name prefix. Override with --site-prefix (or
+# SITE_PREFIX) if you host the same tree under a subpath instead.
+DEFAULT_SITE_PREFIX = ""
 
 
 @dataclass
@@ -210,7 +212,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="Number of apps to build concurrently")
     ap.add_argument("--max-iterations", type=int, default=None)
     ap.add_argument("--site-prefix", default=os.environ.get("SITE_PREFIX", DEFAULT_SITE_PREFIX),
-                    help="URL prefix the site is served under on GitHub Pages")
+                    help="URL prefix the site is served under (empty for a domain root)")
     ap.add_argument("--no-web-search", action="store_true")
     ap.add_argument("--force", action="store_true",
                     help="Overwrite existing app directories")
@@ -342,7 +344,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\n{ok}/{len(results)} apps built cleanly")
     print(f"manifest: {run_dir / 'manifest.json'}")
     print(f"report:   {report_path}")
-    print("\nNext: ./scripts/publish.sh   (assemble site/ and push to GitHub Pages)")
+    print("\nNext: ./scripts/deploy_vercel.sh   (assemble site/ and deploy)")
+    print("  or: ./scripts/publish.sh --serve  (assemble site/ and serve locally)")
     return 0 if ok == len(results) else 1
 
 

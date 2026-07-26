@@ -2,12 +2,13 @@
 
 Layout produced under `site/`:
 
+    site/vercel.json                 routing + caching for the deployed site
     site/index.html                  gallery of apps + list of runs
     site/apps/<app-id>/              each app's Vite dist output
     site/runs/<run-id>/report.html   run reports, with screenshots alongside
 
-The same tree is served by the local `gallery` container and by GitHub Pages,
-so links behave identically in both.
+The tree is entirely relative-linked, so the same directory works served from
+the local `gallery` container, from `python -m http.server`, and from Vercel.
 """
 
 from __future__ import annotations
@@ -24,6 +25,37 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 APPS_DIR = REPO_ROOT / "apps"
 RUNS_DIR = REPO_ROOT / "runs"
 SITE_DIR = REPO_ROOT / "site"
+
+# Written to site/vercel.json on every assemble, so the deployed directory is
+# self-describing and `vercel deploy site` needs no extra flags.
+#
+# `rewrites` are evaluated *after* the filesystem check, so real files (hashed
+# assets, screenshots, manifests) still serve directly; only unmatched paths
+# inside an app fall through to that app's index.html. That gives each app its
+# own SPA fallback without one app's routes swallowing another's.
+VERCEL_CONFIG: dict[str, Any] = {
+    "$schema": "https://openapi.vercel.sh/vercel.json",
+    "trailingSlash": True,
+    "rewrites": [
+        {"source": "/apps/:appId/:path*", "destination": "/apps/:appId/index.html"},
+    ],
+    "headers": [
+        {
+            # Vite fingerprints these filenames, so they can be cached forever.
+            "source": "/apps/:appId/assets/:file*",
+            "headers": [
+                {"key": "Cache-Control", "value": "public, max-age=31536000, immutable"},
+            ],
+        },
+        {
+            # Everything else is republished in place and must revalidate.
+            "source": "/(.*)",
+            "headers": [
+                {"key": "Cache-Control", "value": "public, max-age=0, must-revalidate"},
+            ],
+        },
+    ],
+}
 
 INDEX_CSS = """
 *,*::before,*::after{box-sizing:border-box}
@@ -104,7 +136,9 @@ def build(clean: bool = True) -> Path:
     if clean and SITE_DIR.exists():
         shutil.rmtree(SITE_DIR)
     SITE_DIR.mkdir(parents=True, exist_ok=True)
-    (SITE_DIR / ".nojekyll").write_text("", encoding="utf-8")
+    (SITE_DIR / "vercel.json").write_text(
+        json.dumps(VERCEL_CONFIG, indent=2) + "\n", encoding="utf-8"
+    )
 
     # 1. Apps — copy each dist/ that exists.
     published: list[str] = []

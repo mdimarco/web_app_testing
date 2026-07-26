@@ -34,8 +34,8 @@ Paths in every tool call are relative to the app root (`src/App.tsx`, not
   would be substantially worse, and never add a package that needs a build
   plugin or native compilation.
 - **Use relative asset paths.** The app is served from a subpath like
-  `/web_app_testing/apps/<id>/`, so a leading-slash URL such as `/logo.png`
-  breaks. Import assets from `src/` or use paths relative to the document.
+  `/apps/<id>/`, so a leading-slash URL such as `/logo.png` breaks. Import
+  assets from `src/` or use paths relative to the document.
 - **Ship a single-page app.** Client-side routing must not depend on server
   rewrites; if you need routes, use hash routing.
 

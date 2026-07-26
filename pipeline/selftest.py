@@ -380,7 +380,7 @@ def test_report() -> None:
              "estimated_cost_usd": 0.3, "final_message": "Built it.",
              "build_ok": True, "screenshot": "screenshots/v1-kanban.png",
              "console_errors": [], "page_errors": [],
-             "app_url": "/web_app_testing/apps/v1-kanban/",
+             "app_url": "/apps/v1-kanban/",
              "transcript": "transcripts/v1-kanban.jsonl"},
             {"app_id": "v1-broken", "prompt_id": "broken", "title": "Broken",
              "prompt": "p", "status": "build_failed", "agent_stop_reason": "max_iterations",
@@ -388,7 +388,7 @@ def test_report() -> None:
              "estimated_cost_usd": 0.12, "build_ok": False,
              "build_log_tail": "TS2345: type error", "agent_error": "hit cap",
              "console_errors": ["boom"], "page_errors": [],
-             "app_url": "/web_app_testing/apps/v1-broken/"},
+             "app_url": "/apps/v1-broken/"},
         ],
     }
     html_out = report_mod.render(manifest)
@@ -413,6 +413,33 @@ def test_report() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_vercel_config() -> None:
+    print("\nvercel config")
+    from agent.site import VERCEL_CONFIG
+
+    rewrites = VERCEL_CONFIG.get("rewrites", [])
+    check("one SPA rewrite per app", len(rewrites) == 1, str(rewrites))
+    src, dst = rewrites[0]["source"], rewrites[0]["destination"]
+    check("rewrite is scoped to a single app id",
+          src == "/apps/:appId/:path*" and dst == "/apps/:appId/index.html",
+          f"{src} -> {dst}")
+    check("rewrite cannot swallow the gallery index", not src.startswith("/(") ,
+          src)
+    check("trailing slash matches the links we emit",
+          VERCEL_CONFIG.get("trailingSlash") is True)
+
+    headers = VERCEL_CONFIG.get("headers", [])
+    immutable = [h for h in headers
+                 if any("immutable" in x["value"] for x in h["headers"])]
+    check("hashed assets are cached immutably", len(immutable) == 1, str(headers))
+    check("immutable rule targets only /assets/",
+          "/assets/" in immutable[0]["source"], immutable[0]["source"])
+    check("everything else must revalidate",
+          any(h["source"] == "/(.*)"
+              and "must-revalidate" in h["headers"][0]["value"] for h in headers))
+    check("config is JSON-serializable", bool(json.dumps(VERCEL_CONFIG)))
+
+
 def main() -> int:
     print("pipeline self-test (no API key required)")
     test_workspace()
@@ -423,6 +450,7 @@ def main() -> int:
     test_transcript()
     test_promptset()
     test_report()
+    test_vercel_config()
 
     print()
     if failures:
