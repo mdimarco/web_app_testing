@@ -1,7 +1,7 @@
 """Generate the HTML overview for a pipeline run.
 
-The report is written to `runs/<run_id>/report.html` with only relative links,
-so the same file works from the local gallery container and from GitHub Pages
+The report is written to `runs/<run_id>/report.html` with only relative links, so
+the same file works from the local gallery container and from the deployed site
 once `scripts/publish.sh` has assembled `site/`.
 """
 
@@ -17,6 +17,7 @@ STATUS_LABEL = {
     "build_failed": ("Build failed", "bad"),
     "agent_failed": ("Agent stopped early", "warn"),
     "error": ("Error", "bad"),
+    "not_generated": ("Never started", "warn"),
 }
 
 CSS = """
@@ -100,6 +101,35 @@ details pre{white-space:pre-wrap;font-size:12.5px;margin:10px 0 0;padding:12px;
 .err{color:var(--bad)}
 footer{margin-top:56px;padding-top:20px;border-top:1px solid var(--line);
   color:var(--muted);font-size:13px;font-family:ui-sans-serif,system-ui,sans-serif}
+
+/* --- A/B comparison mode --- */
+.pair{border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);
+  margin:0 0 30px;overflow:hidden}
+.pair-head{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:baseline;
+  padding:20px 22px 16px;border-bottom:1px solid var(--line)}
+.pair-head h2{margin:0}
+.pair-head .note{color:var(--muted);font-size:14px;font-style:italic}
+.arms{display:grid;grid-template-columns:1fr 1fr;gap:0}
+@media (max-width:860px){.arms{grid-template-columns:1fr}}
+.arm{padding:20px 22px 22px}
+.arm+.arm{border-left:1px solid var(--line)}
+@media (max-width:860px){.arm+.arm{border-left:0;border-top:1px solid var(--line)}}
+.arm-label{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:0 0 12px}
+.arm-label b{font-family:ui-sans-serif,system-ui,sans-serif;font-size:11px;font-weight:700;
+  letter-spacing:.1em;text-transform:uppercase}
+.arm-before b{color:var(--muted)}
+.arm-after b{color:var(--accent)}
+.wordcount{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;color:var(--muted)}
+
+table.cmp{width:100%;border-collapse:collapse;font-size:14px;margin:0 0 40px;
+  font-family:ui-sans-serif,system-ui,sans-serif}
+table.cmp th{text-align:left;font-size:11px;letter-spacing:.07em;text-transform:uppercase;
+  color:var(--muted);font-weight:600;padding:0 12px 8px 0;border-bottom:1px solid var(--line)}
+table.cmp td{padding:9px 12px 9px 0;border-bottom:1px solid var(--line);
+  font-variant-numeric:tabular-nums}
+table.cmp td.name{font-family:ui-monospace,Menlo,monospace;font-size:12.5px}
+table.cmp .delta{color:var(--muted);font-size:12.5px}
+table.cmp .up{color:var(--ok)} table.cmp .down{color:var(--bad)}
 """
 
 
@@ -192,6 +222,136 @@ def _app_card(app: dict[str, Any], depth_to_root: str) -> str:
     </article>"""
 
 
+VARIANT_LABEL = {"before": "As typed", "after": "As rewritten"}
+
+
+def _arm(app: dict[str, Any] | None, variant: str, depth_to_root: str) -> str:
+    """One side of an A/B pair: screenshot, link, metrics, and the prompt."""
+    label = VARIANT_LABEL.get(variant, variant.title() or "—")
+    if app is None:
+        return (
+            f'<div class="arm arm-{_e(variant)}"><p class="arm-label"><b>{_e(label)}</b>'
+            '</p><div class="shot-missing">This variant was not run.</div></div>'
+        )
+
+    status, tone = STATUS_LABEL.get(app.get("status", "error"), ("Unknown", "warn"))
+    href = f"{depth_to_root}apps/{app['app_id']}/"
+    usage = app.get("usage") or {}
+    words = len((app.get("prompt") or "").split())
+
+    if app.get("screenshot"):
+        preview = (
+            f'<a href="{_e(href)}"><img class="shot" loading="lazy" '
+            f'src="{_e(app["screenshot"])}" alt="Screenshot of {_e(app["title"])}"></a>'
+        )
+    else:
+        preview = (
+            '<div class="shot-missing">No screenshot — the app did not build, '
+            "or Playwright was unavailable.</div>"
+        )
+
+    disabled = "" if app.get("build_ok") else ' aria-disabled="true"'
+    extras: list[str] = []
+    if app.get("final_message"):
+        extras.append("<details><summary>Agent's closing message</summary>"
+                      f"<pre>{_e(app['final_message'])}</pre></details>")
+    if not app.get("build_ok") and app.get("build_log_tail"):
+        extras.append('<details open><summary class="err">Build output</summary>'
+                      f"<pre class=\"err\">{_e(app['build_log_tail'])}</pre></details>")
+    if app.get("agent_error"):
+        extras.append('<details><summary class="err">Agent error</summary>'
+                      f"<pre class=\"err\">{_e(app['agent_error'])}</pre></details>")
+    errs = (app.get("console_errors") or []) + (app.get("page_errors") or [])
+    if errs:
+        extras.append(f'<details><summary class="err">{len(errs)} console error(s)'
+                      '</summary><pre class="err">' + _e("\n".join(errs))
+                      + "</pre></details>")
+
+    return f"""
+      <div class="arm arm-{_e(variant)}">
+        <p class="arm-label">
+          <b>{_e(label)}</b>
+          <span class="badge {tone}">{_e(status)}</span>
+          <span class="wordcount">{words:,} words in</span>
+        </p>
+        {preview}
+        <div class="actions">
+          <a class="btn" href="{_e(href)}"{disabled}>Open the app</a>
+          <a class="btn ghost" href="{_e(href)}" target="_blank" rel="noopener"{disabled}>New tab</a>
+        </div>
+        <ul class="meta">
+          <li>Iterations <b>{_e(app.get('iterations', 0))}</b></li>
+          <li>Duration <b>{_e(app.get('elapsed_seconds', 0))}s</b></li>
+          <li>Output <b>{usage.get('output_tokens', 0):,}</b> tok</li>
+          <li>Cost <b>${app.get('estimated_cost_usd', 0):.2f}</b></li>
+        </ul>
+        <details>
+          <summary>Prompt — {_e(label.lower())} ({words:,} words)</summary>
+          <pre>{_e(app.get('prompt'))}</pre>
+        </details>
+        {''.join(extras)}
+      </div>"""
+
+
+def _pair_section(pair_id: str, apps: dict[str, dict[str, Any]],
+                  depth_to_root: str) -> str:
+    any_app = apps.get("after") or apps.get("before") or {}
+    title = (any_app.get("title") or pair_id).split(" — ")[0]
+    note = (apps.get("after") or {}).get("notes") or ""
+    return f"""
+    <section class="pair" id="{_e(pair_id)}">
+      <div class="pair-head">
+        <h2>{_e(title)}</h2>
+        <span class="mono" style="color:var(--muted)">{_e(pair_id)}</span>
+        {f'<span class="note">{_e(note)}</span>' if note else ''}
+      </div>
+      <div class="arms">
+        {_arm(apps.get("before"), "before", depth_to_root)}
+        {_arm(apps.get("after"), "after", depth_to_root)}
+      </div>
+    </section>"""
+
+
+def _comparison_table(pairs: dict[str, dict[str, dict[str, Any]]]) -> str:
+    """Before/after side by side on the numbers that vary."""
+    rows = []
+    for pair_id, arms in pairs.items():
+        b, a = arms.get("before"), arms.get("after")
+
+        def cell(app: dict[str, Any] | None, key: str, fmt: str = "{:,}") -> str:
+            if not app:
+                return "—"
+            val = (app.get("usage") or {}).get(key, app.get(key, 0))
+            return fmt.format(val)
+
+        def built(app: dict[str, Any] | None) -> str:
+            if not app:
+                return "—"
+            return ('<span class="up">yes</span>' if app.get("build_ok")
+                    else '<span class="down">no</span>')
+
+        rows.append(
+            f"<tr><td class='name'>{_e(pair_id)}</td>"
+            f"<td>{cell(b, 'prompt_words')}</td><td>{cell(a, 'prompt_words')}</td>"
+            f"<td>{built(b)}</td><td>{built(a)}</td>"
+            f"<td>{cell(b, 'iterations')}</td><td>{cell(a, 'iterations')}</td>"
+            f"<td>{cell(b, 'output_tokens')}</td><td>{cell(a, 'output_tokens')}</td>"
+            f"<td>{cell(b, 'estimated_cost_usd', '${:.2f}')}</td>"
+            f"<td>{cell(a, 'estimated_cost_usd', '${:.2f}')}</td></tr>"
+        )
+    return f"""
+    <table class="cmp">
+      <thead><tr>
+        <th>Pair</th><th>Words in<br>before</th><th>Words in<br>after</th>
+        <th>Built<br>before</th><th>Built<br>after</th>
+        <th>Iters<br>before</th><th>Iters<br>after</th>
+        <th>Out tok<br>before</th><th>Out tok<br>after</th>
+        <th>Cost<br>before</th><th>Cost<br>after</th>
+      </tr></thead>
+      <tbody>{''.join(rows)}</tbody>
+    </table>"""
+
+
 def render(manifest: dict[str, Any], depth_to_root: str = "../../") -> str:
     """Render the run report. `depth_to_root` is the path from the report to site root."""
     apps = manifest.get("apps", [])
@@ -209,6 +369,27 @@ def render(manifest: dict[str, Any], depth_to_root: str = "../../") -> str:
     stat_html = "".join(
         f'<li class="stat"><b>{_e(v)}</b><span>{_e(k)}</span></li>' for v, k in stats
     )
+
+    # A/B mode when any app declares a pair: group the arms and render them
+    # side by side instead of as a flat list.
+    paired = [a for a in apps if a.get("pair")]
+    if paired:
+        pairs: dict[str, dict[str, dict[str, Any]]] = {}
+        for app in apps:
+            pid = app.get("pair")
+            if not pid:
+                continue
+            app = {**app, "prompt_words": len((app.get("prompt") or "").split())}
+            pairs.setdefault(pid, {})[app.get("variant") or "before"] = app
+        body = (
+            _comparison_table(pairs)
+            + "".join(_pair_section(pid, arms, depth_to_root)
+                      for pid, arms in pairs.items())
+        )
+        unpaired = [a for a in apps if not a.get("pair")]
+        body += "".join(_app_card(a, depth_to_root) for a in unpaired)
+    else:
+        body = "".join(_app_card(a, depth_to_root) for a in apps)
 
     return f"""<!doctype html>
 <html lang="en">
@@ -230,7 +411,7 @@ def render(manifest: dict[str, Any], depth_to_root: str = "../../") -> str:
     <ul class="stats">{stat_html}</ul>
   </header>
   <main>
-    {''.join(_app_card(a, depth_to_root) for a in apps)}
+    {body}
   </main>
   <footer>
     <p>Promptset <span class="mono">{_e(pset.get('path'))}</span> ·

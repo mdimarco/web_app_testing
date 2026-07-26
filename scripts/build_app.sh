@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build one app for deployment (with the GitHub Pages base path baked in).
+# Build one app for deployment (with the deploy base path baked in).
 #
 #   ./scripts/build_app.sh v1-kanban
 #   ./scripts/build_app.sh --all
@@ -8,7 +8,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-SITE_PREFIX="${SITE_PREFIX:-/web_app_testing}"
+# Empty by default: the site deploys at a domain root on Vercel, so apps live at
+# /apps/<id>/. Set SITE_PREFIX=/some/path to host the tree under a subpath.
+SITE_PREFIX="${SITE_PREFIX:-}"
 
 build_one() {
   local app_id="$1"

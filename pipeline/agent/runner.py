@@ -19,6 +19,8 @@ import anthropic
 
 from . import report as report_mod
 from . import screenshot
+from .gemini_loop import DEFAULT_MODEL as GEMINI_DEFAULT_MODEL
+from .gemini_loop import run_agent_gemini
 from .loop import DEFAULT_MODEL, LoopLimits, run_agent
 from .promptset import Prompt, Promptset
 from .tools import Workspace
@@ -29,8 +31,10 @@ APPS_DIR = REPO_ROOT / "apps"
 RUNS_DIR = REPO_ROOT / "runs"
 DEFAULT_SI = Path(__file__).with_name("system_prompt.md")
 
-# GitHub Pages serves this repo at https://<owner>.github.io/<repo>/
-DEFAULT_SITE_PREFIX = "/web_app_testing"
+# Vercel serves the assembled site/ at the domain root, so apps live at
+# /apps/<id>/ with no repo-name prefix. Override with --site-prefix (or
+# SITE_PREFIX) if you host the same tree under a subpath instead.
+DEFAULT_SITE_PREFIX = ""
 
 
 @dataclass
@@ -40,6 +44,9 @@ class AppResult:
     title: str
     prompt: str
     status: str                      # "ok" | "build_failed" | "agent_failed" | "error"
+    pair: str = ""                   # apps sharing a pair are A/B variants
+    variant: str = ""                # e.g. "before" / "after"
+    notes: str = ""                  # free-text label carried from the promptset
     agent_stop_reason: str = ""
     agent_error: str | None = None
     iterations: int = 0
@@ -55,6 +62,12 @@ class AppResult:
     page_errors: list[str] = field(default_factory=list)
     app_url: str = ""
     transcript: str | None = None
+
+
+def _model_matches(model: str, provider: str) -> bool:
+    """True when a model id belongs to the given provider's family."""
+    return model.startswith("gemini") if provider == "gemini" else \
+        model.startswith(("claude", "anthropic."))
 
 
 def _now_slug() -> str:
@@ -90,6 +103,25 @@ def scaffold(app_dir: Path, *, force: bool = False) -> None:
             pass
 
 
+def is_template_only(app_dir: Path) -> bool:
+    """True when the agent never meaningfully touched the scaffold.
+
+    A run that dies on its first turn still leaves a workspace that builds and
+    screenshots perfectly — it is just the template. Without this check those
+    appear in the report as successful generations.
+    """
+    src = app_dir / "src"
+    tmpl = TEMPLATE_DIR / "src"
+    if not src.exists():
+        return True
+    app_files = {p.relative_to(src) for p in src.rglob("*") if p.is_file()}
+    tmpl_files = {p.relative_to(tmpl) for p in tmpl.rglob("*") if p.is_file()}
+    if app_files != tmpl_files:
+        return False
+    return all((src / rel).read_bytes() == (tmpl / rel).read_bytes()
+               for rel in app_files)
+
+
 def build_for_deploy(app_dir: Path, base: str, timeout: int = 600) -> tuple[bool, str]:
     """Build the app with the deployment base path baked in."""
     env = {**os.environ, "VITE_BASE": base, "NODE_ENV": "production", "CI": "true"}
@@ -120,6 +152,7 @@ def run_one(
     enable_web_search: bool,
     force: bool,
     echo: bool,
+    provider: str = "anthropic",
 ) -> AppResult:
     app_dir = APPS_DIR / app_id
     base = f"{site_prefix.rstrip('/')}/apps/{app_id}/"
@@ -129,6 +162,9 @@ def run_one(
         title=prompt.title,
         prompt=prompt.prompt,
         status="error",
+        pair=prompt.pair,
+        variant=prompt.variant,
+        notes=prompt.notes,
         app_url=base,
     )
 
@@ -142,7 +178,8 @@ def run_one(
     trace_path = run_dir / "transcripts" / f"{app_id}.jsonl"
     workspace = Workspace(root=app_dir)
 
-    loop_result = run_agent(
+    driver = run_agent_gemini if provider == "gemini" else run_agent
+    loop_result = driver(
         prompt=prompt.prompt,
         system_prompt=system_prompt,
         workspace=workspace,
@@ -159,10 +196,18 @@ def run_one(
     result.iterations = loop_result.iterations
     result.elapsed_seconds = round(loop_result.elapsed_seconds, 1)
     result.usage = loop_result.usage.as_dict()
-    result.estimated_cost_usd = round(loop_result.usage.estimated_cost_usd(), 4)
+    result.estimated_cost_usd = round(loop_result.cost_usd, 4)
     result.tool_call_counts = loop_result.tool_call_counts
     result.final_message = loop_result.final_text
     result.transcript = str(trace_path.relative_to(run_dir))
+
+    if is_template_only(app_dir):
+        # The scaffold builds and screenshots fine; reporting it as a result
+        # would be a lie about what the agent produced.
+        result.status = "not_generated"
+        result.build_ok = False
+        print("  agent produced nothing — workspace is still the template")
+        return result
 
     # Always attempt the deploy build, even after a bad agent stop — a run that
     # hit max_iterations may still have produced a working app.
@@ -199,7 +244,10 @@ def main(argv: list[str] | None = None) -> int:
         description="Run a versioned promptset through the app-building agent.",
     )
     ap.add_argument("promptset", help="Path to a promptset directory or promptset.yaml")
-    ap.add_argument("--model", default=None, help=f"default: {DEFAULT_MODEL}")
+    ap.add_argument("--provider", default=None, choices=["anthropic", "gemini"],
+                    help="Which native loop to drive (default: anthropic)")
+    ap.add_argument("--model", default=None,
+                    help=f"default: {DEFAULT_MODEL} / {GEMINI_DEFAULT_MODEL}")
     ap.add_argument("--effort", default=None,
                     choices=["low", "medium", "high", "xhigh", "max"])
     ap.add_argument("--only", nargs="*", metavar="PROMPT_ID",
@@ -210,11 +258,13 @@ def main(argv: list[str] | None = None) -> int:
                     help="Number of apps to build concurrently")
     ap.add_argument("--max-iterations", type=int, default=None)
     ap.add_argument("--site-prefix", default=os.environ.get("SITE_PREFIX", DEFAULT_SITE_PREFIX),
-                    help="URL prefix the site is served under on GitHub Pages")
+                    help="URL prefix the site is served under (empty for a domain root)")
     ap.add_argument("--no-web-search", action="store_true")
     ap.add_argument("--force", action="store_true",
                     help="Overwrite existing app directories")
     ap.add_argument("--run-id", default=None)
+    ap.add_argument("--append", action="store_true",
+                    help="Merge into an existing --run-id instead of replacing it")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args(argv)
 
@@ -227,7 +277,17 @@ def main(argv: list[str] | None = None) -> int:
 
     pset = Promptset.load(args.promptset)
     defaults = pset.defaults
-    model = args.model or defaults.get("model") or DEFAULT_MODEL
+    provider = args.provider or defaults.get("provider") or "anthropic"
+    provider_default = GEMINI_DEFAULT_MODEL if provider == "gemini" else DEFAULT_MODEL
+    # A promptset's pinned model belongs to its provider; ignore it when the
+    # caller switches providers on the command line, or Gemini would be handed
+    # "claude-sonnet-5".
+    pinned = defaults.get("model")
+    if args.provider and pinned and not _model_matches(pinned, provider):
+        print(f"note: ignoring promptset model {pinned!r} for provider "
+              f"{provider!r}; using {provider_default!r}", file=sys.stderr)
+        pinned = None
+    model = args.model or pinned or provider_default
     effort = args.effort or defaults.get("effort") or "high"
     limits = LoopLimits(
         max_iterations=args.max_iterations
@@ -265,7 +325,8 @@ def main(argv: list[str] | None = None) -> int:
     suffix = f"-{args.tag}" if args.tag else ""
     started = time.time()
 
-    print(f"run {run_id}: {len(prompts)} prompt(s), model={model}, effort={effort}")
+    print(f"run {run_id}: {len(prompts)} prompt(s), provider={provider}, "
+          f"model={model}, effort={effort}")
 
     def task(p: Prompt) -> AppResult:
         return run_one(
@@ -280,6 +341,7 @@ def main(argv: list[str] | None = None) -> int:
             enable_web_search=enable_web_search,
             force=args.force,
             echo=not args.quiet,
+            provider=provider,
         )
 
     results: list[AppResult] = []
@@ -295,6 +357,7 @@ def main(argv: list[str] | None = None) -> int:
                         AppResult(
                             app_id=f"{pset.id}-{p.id}{suffix}", prompt_id=p.id,
                             title=p.title, prompt=p.prompt, status="error",
+                            pair=p.pair, variant=p.variant, notes=p.notes,
                             agent_error=f"{type(exc).__name__}: {exc}",
                         )
                     )
@@ -304,6 +367,28 @@ def main(argv: list[str] | None = None) -> int:
         for p in prompts:
             results.append(task(p))
 
+    # --append lets a run be built up in stages (validate one pair, then add the
+    # rest) while producing a single report. Results are merged by app_id, with
+    # this invocation's results winning.
+    prior: list[dict[str, Any]] = []
+    manifest_path = run_dir / "manifest.json"
+    if args.append and manifest_path.exists():
+        try:
+            existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+            fresh = {r.app_id for r in results}
+            prior = [a for a in existing.get("apps", [])
+                     if a.get("app_id") not in fresh]
+            started = min(started, time.mktime(time.strptime(
+                existing["started_at"][:19], "%Y-%m-%dT%H:%M:%S")))
+        except (json.JSONDecodeError, KeyError, ValueError) as exc:
+            print(f"warning: could not merge prior manifest ({exc}); overwriting",
+                  file=sys.stderr)
+
+    all_apps = prior + [asdict(r) for r in results]
+    # Keep promptset order stable across appends.
+    pset_order = {p.id: i for i, p in enumerate(pset.prompts)}
+    all_apps.sort(key=lambda a: pset_order.get(a.get("prompt_id"), 999))
+
     manifest: dict[str, Any] = {
         "run_id": run_id,
         "promptset": {
@@ -312,6 +397,7 @@ def main(argv: list[str] | None = None) -> int:
             "description": pset.description,
             "path": str(pset.path.relative_to(REPO_ROOT)),
         },
+        "provider": provider,
         "model": model,
         "effort": effort,
         "web_search": enable_web_search,
@@ -321,14 +407,16 @@ def main(argv: list[str] | None = None) -> int:
         "started_at": datetime.fromtimestamp(started, timezone.utc).isoformat(),
         "finished_at": datetime.now(timezone.utc).isoformat(),
         "duration_seconds": round(time.time() - started, 1),
-        "apps": [asdict(r) for r in results],
+        "apps": all_apps,
         "totals": {
-            "apps": len(results),
-            "ok": sum(1 for r in results if r.status == "ok"),
-            "output_tokens": sum(r.usage.get("output_tokens", 0) for r in results),
-            "input_tokens": sum(r.usage.get("input_tokens", 0) for r in results),
+            "apps": len(all_apps),
+            "ok": sum(1 for a in all_apps if a.get("status") == "ok"),
+            "output_tokens": sum((a.get("usage") or {}).get("output_tokens", 0)
+                                 for a in all_apps),
+            "input_tokens": sum((a.get("usage") or {}).get("input_tokens", 0)
+                                for a in all_apps),
             "estimated_cost_usd": round(
-                sum(r.estimated_cost_usd for r in results), 4
+                sum(a.get("estimated_cost_usd", 0) for a in all_apps), 4
             ),
         },
     }
@@ -339,11 +427,13 @@ def main(argv: list[str] | None = None) -> int:
     report_path = report_mod.write_report(run_dir, manifest)
 
     ok = manifest["totals"]["ok"]
-    print(f"\n{ok}/{len(results)} apps built cleanly")
+    print(f"\n{ok}/{len(all_apps)} apps built cleanly"
+          + (f" (this pass: {len(results)})" if prior else ""))
     print(f"manifest: {run_dir / 'manifest.json'}")
     print(f"report:   {report_path}")
-    print("\nNext: ./scripts/publish.sh   (assemble site/ and push to GitHub Pages)")
-    return 0 if ok == len(results) else 1
+    print("\nNext: ./scripts/deploy_vercel.sh   (assemble site/ and deploy)")
+    print("  or: ./scripts/publish.sh --serve  (assemble site/ and serve locally)")
+    return 0 if ok == len(all_apps) else 1
 
 
 if __name__ == "__main__":

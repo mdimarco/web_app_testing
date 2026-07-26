@@ -89,7 +89,7 @@ def capture(
     page_errors: list[str] = []
 
     with tempfile.TemporaryDirectory() as tmp:
-        # Mirror the deployed layout: <tmp>/web_app_testing/apps/<id>/index.html
+        # Mirror the deployed layout: <tmp>/apps/<id>/index.html
         mount = Path(tmp) / base_path.strip("/")
         mount.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(dist_dir, mount, dirs_exist_ok=True)

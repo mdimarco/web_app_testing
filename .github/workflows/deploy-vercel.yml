@@ -1,0 +1,114 @@
+name: Deploy apps to Vercel
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/**"
+      - "runs/**"
+      - "template/**"
+      - "pipeline/agent/site.py"
+      - ".github/workflows/deploy-vercel.yml"
+  workflow_dispatch:
+
+# One deploy at a time; let an in-flight run finish rather than cancelling it.
+concurrency:
+  group: vercel-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # Without a token the deploy step can only fail; skip the whole job with a
+    # clear reason instead of burning a red run on every push.
+    if: ${{ github.event_name == 'workflow_dispatch' || vars.VERCEL_ENABLED != 'false' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check for a Vercel token
+        id: guard
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          if [[ -z "$VERCEL_TOKEN" ]]; then
+            echo "::warning title=Vercel not configured::\
+          Set the VERCEL_TOKEN repository secret to enable deploys. \
+          Building the site anyway so failures still surface."
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build every app
+        run: |
+          shopt -s nullglob
+          built=0; failed=0
+          for dir in apps/*/; do
+            app_id="$(basename "$dir")"
+            [[ -f "$dir/package.json" ]] || continue
+            base="/apps/$app_id/"
+            echo "::group::build $app_id (base=$base)"
+            if (cd "$dir" \
+                && npm install --no-fund --no-audit \
+                && VITE_BASE="$base" npm run build); then
+              built=$((built+1))
+            else
+              # A single broken app must not block publishing the others.
+              echo "::warning title=Build failed::$app_id did not build; skipping"
+              failed=$((failed+1))
+            fi
+            echo "::endgroup::"
+          done
+          echo "built=$built failed=$failed"
+
+      - name: Assemble site/
+        run: |
+          pip install --quiet PyYAML
+          cd pipeline && python -m agent.site
+
+      - name: Deploy to Vercel
+        if: steps.guard.outputs.deploy == 'true'
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_PROJECT: ${{ vars.VERCEL_PROJECT || 'web-app-testing' }}
+          VERCEL_SCOPE: ${{ vars.VERCEL_SCOPE }}
+        run: |
+          scope=()
+          [[ -n "$VERCEL_SCOPE" ]] && scope=(--scope "$VERCEL_SCOPE")
+
+          # Link after the site is assembled: assembling replaces site/'s
+          # contents, and an unlinked deploy silently creates a new project
+          # named after the directory instead of updating this one.
+          npx --yes vercel@latest link --yes --cwd site \
+            --project "$VERCEL_PROJECT" --token "$VERCEL_TOKEN" "${scope[@]}"
+
+          # Non-TTY stdout is a JSON envelope; the stable alias is on stderr.
+          npx --yes vercel@latest deploy --prod --yes --cwd site \
+            --token "$VERCEL_TOKEN" "${scope[@]}" >deploy.json 2>deploy.log \
+            || { sed "s|$VERCEL_TOKEN|<redacted>|g" deploy.log >&2; exit 1; }
+
+          url="https://$(python3 -c \
+            'import json;print(json.load(open("deploy.json"))["deployment"]["url"])' \
+            | sed 's|^https://||')"
+          site="$(grep -Eo 'https://[a-z0-9.-]+\.vercel\.app' deploy.log | tail -n 1)"
+          site="${site:-$url}"
+
+          echo "Deployed to $site"
+          {
+            echo "### Deployed to Vercel"
+            echo
+            echo "- Gallery: $site/"
+            echo "- Apps: \`$site/apps/<app-id>/\`"
+            echo "- This deployment: $url"
+          } >> "$GITHUB_STEP_SUMMARY"

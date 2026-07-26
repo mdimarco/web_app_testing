@@ -271,6 +271,43 @@ def test_loop_pause_and_refusal() -> None:
         check("refusal category recorded", "cyber" in (res.error or ""), str(res.error))
 
 
+def test_loop_max_tokens_resume() -> None:
+    print("\nReAct loop — truncated turn resumes")
+    with temp_app() as app:
+        # Turn 1 is cut off mid-tool-call; the loop must drop the incomplete
+        # tool_use and ask for a continuation rather than failing the run.
+        client = FakeClient([
+            FakeResponse([text_block("Writing the comp"),
+                          tool_block("t1", "write_file", {"path": "src/A.tsx"})],
+                         "max_tokens"),
+            FakeResponse([text_block("resumed and finished")], "end_turn"),
+        ])
+        res = run_agent(prompt="p", system_prompt="SI", workspace=Workspace(root=app),
+                        client=client, echo=False)
+        check("truncated turn does not fail the run", res.ok, res.stop_reason)
+        sent = client.requests[1]["messages"]
+        assistant = sent[-2]
+        check("incomplete tool_use stripped from the echoed turn",
+              all(b.get("type") != "tool_use" for b in assistant["content"]),
+              json.dumps(assistant)[:200])
+        check("continuation prompt appended",
+              sent[-1]["role"] == "user" and "cut off" in sent[-1]["content"])
+
+    with temp_app() as app:
+        # A turn whose entire content was a truncated tool_use leaves nothing to
+        # echo; the empty assistant message must be removed, not sent.
+        client = FakeClient([
+            FakeResponse([tool_block("t1", "write_file", {"path": "x"})], "max_tokens"),
+            FakeResponse([text_block("ok")], "end_turn"),
+        ])
+        res = run_agent(prompt="p", system_prompt="SI", workspace=Workspace(root=app),
+                        client=client, echo=False)
+        check("empty truncated turn dropped entirely", res.ok, res.stop_reason)
+        check("no empty assistant message sent",
+              all(m["role"] != "assistant" or m["content"]
+                  for m in client.requests[1]["messages"]))
+
+
 def test_loop_limits() -> None:
     print("\nReAct loop — budget ceilings")
     with temp_app() as app:
@@ -320,6 +357,158 @@ def test_transcript() -> None:
             check("every line is valid JSON", all("ts" in l for l in lines))
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_gemini_loop() -> None:
+    """Drive the native Gemini loop with a stubbed google-genai client."""
+    print("\nGemini loop (native primitives)")
+    from google.genai import types as gt
+
+    from agent.gemini_loop import (EFFORT_TO_THINKING_LEVEL, QuotaExhausted,
+                                   RateLimiter, run_agent_gemini)
+
+    def resp(parts, finish="STOP", cached=0):
+        return gt.GenerateContentResponse(
+            candidates=[gt.Candidate(
+                content=gt.Content(role="model", parts=parts), finish_reason=finish)],
+            usage_metadata=gt.GenerateContentResponseUsageMetadata(
+                prompt_token_count=1000, cached_content_token_count=cached,
+                candidates_token_count=200, thoughts_token_count=50),
+        )
+
+    class FakeModels:
+        def __init__(self, script, sink):
+            self.script, self.sink = list(script), sink
+
+        def generate_content(self, *, model, contents, config):
+            self.sink.append({"model": model, "config": config,
+                              "contents": copy.deepcopy(contents)})
+            if not self.script:
+                raise AssertionError("loop asked for more turns than scripted")
+            return self.script.pop(0)
+
+    class FakeGenaiClient:
+        def __init__(self, script):
+            self.requests = []
+            self.models = FakeModels(script, self.requests)
+
+    with temp_app() as app:
+        client = FakeGenaiClient([
+            resp([gt.Part.from_text(text="Writing it."),
+                  gt.Part.from_function_call(
+                      name="write_file",
+                      args={"path": "src/App.tsx", "content": "export default () => null\n"}),
+                  gt.Part.from_function_call(name="read_file", args={"path": "package.json"})]),
+            resp([gt.Part.from_text(text="Done — builds clean.")], cached=800),
+        ])
+        res = run_agent_gemini(
+            prompt="build it", system_prompt="SI", workspace=Workspace(root=app),
+            client=client, echo=False, free_tier=False,
+            limits=LoopLimits(max_iterations=5))
+
+        check("reaches end_turn", res.stop_reason == "end_turn", res.stop_reason)
+        check("function_call actually executed",
+              (app / "src/App.tsx").read_text().strip().endswith("=> null"))
+        check("both calls counted",
+              res.tool_call_counts == {"write_file": 1, "read_file": 1},
+              str(res.tool_call_counts))
+        check("final text captured", "Done" in res.final_text, res.final_text)
+        check("thinking tokens billed as output", res.usage.output_tokens == 500,
+              str(res.usage.output_tokens))
+        check("cached tokens split out of prompt count",
+              res.usage.cache_read_input_tokens == 800
+              and res.usage.input_tokens == 1000 + 200,
+              f"{res.usage.cache_read_input_tokens}/{res.usage.input_tokens}")
+        check("priced with Gemini rates, not Anthropic",
+              0 < res.cost_usd < 0.01, f"${res.cost_usd:.5f}")
+
+        cfg = client.requests[0]["config"]
+        decl = cfg.tools[0].function_declarations
+        check("client tools sent as function_declarations",
+              {d.name for d in decl} == {"read_file", "write_file", "npm_build", "bash"},
+              str([d.name for d in decl]))
+        check("tool schemas reused verbatim as JSON Schema",
+              any(d.parameters_json_schema for d in decl))
+        check("google_search grounding attached",
+              any(t.google_search is not None for t in cfg.tools))
+        check("SDK auto function-calling disabled",
+              cfg.automatic_function_calling.disable is True)
+        check("effort mapped to a ThinkingLevel",
+              str(cfg.thinking_config.thinking_level).endswith(
+                  EFFORT_TO_THINKING_LEVEL["high"]),
+              str(cfg.thinking_config.thinking_level))
+        check("system prompt sent as system_instruction",
+              cfg.system_instruction == "SI")
+
+        # Results must go back as function_response parts in one user Content.
+        second = client.requests[1]["contents"]
+        check("model turn echoed back", second[-2].role == "model")
+        check("results batched into one user Content",
+              second[-1].role == "user" and len(second[-1].parts) == 2)
+        check("results are function_response parts",
+              all(p.function_response is not None for p in second[-1].parts))
+        check("responses keyed by function name",
+              {p.function_response.name for p in second[-1].parts}
+              == {"write_file", "read_file"})
+
+    with temp_app() as app:
+        # A failing tool must come back as a function_response, not an exception.
+        client = FakeGenaiClient([
+            resp([gt.Part.from_function_call(name="read_file",
+                                             args={"path": "../../etc/passwd"})]),
+            resp([gt.Part.from_text(text="understood")]),
+        ])
+        res = run_agent_gemini(prompt="p", system_prompt="SI",
+                               workspace=Workspace(root=app), client=client,
+                               echo=False, free_tier=False)
+        check("tool error survives the turn", res.ok, res.stop_reason)
+        fr = client.requests[1]["contents"][-1].parts[0].function_response
+        check("error returned in the response payload",
+              "escapes" in str(fr.response.get("error", "")), str(fr.response)[:120])
+
+    with temp_app() as app:
+        # MAX_TOKENS is a truncated turn, not a finished one.
+        client = FakeGenaiClient([
+            resp([gt.Part.from_text(text="half a thou")], finish="MAX_TOKENS"),
+            resp([gt.Part.from_text(text="finished")]),
+        ])
+        res = run_agent_gemini(prompt="p", system_prompt="SI",
+                               workspace=Workspace(root=app), client=client,
+                               echo=False, free_tier=False)
+        check("MAX_TOKENS resumes rather than failing", res.ok, res.stop_reason)
+        check("continuation prompt appended",
+              "cut off" in client.requests[1]["contents"][-1].parts[0].text)
+
+    with temp_app() as app:
+        client = FakeGenaiClient([resp([gt.Part.from_text(text="no")],
+                                       finish="SAFETY")])
+        res = run_agent_gemini(prompt="p", system_prompt="SI",
+                               workspace=Workspace(root=app), client=client,
+                               echo=False, free_tier=False)
+        check("SAFETY reported as a refusal", res.stop_reason == "refusal",
+              res.stop_reason)
+
+    # Free-tier pacing: the daily cap must stop the run with a clear reason
+    # rather than surfacing as a string of opaque 429s.
+    rl = RateLimiter(rpm=1000, rpd=2)
+    rl.acquire(); rl.acquire()
+    try:
+        rl.acquire()
+        check("daily quota raises QuotaExhausted", False, "no error raised")
+    except QuotaExhausted:
+        check("daily quota raises QuotaExhausted", True)
+
+    with temp_app() as app:
+        client = FakeGenaiClient([
+            resp([gt.Part.from_function_call(name="bash", args={"command": "true"})])
+            for _ in range(5)
+        ])
+        res = run_agent_gemini(prompt="p", system_prompt="SI",
+                               workspace=Workspace(root=app), client=client,
+                               echo=False, rate_limiter=RateLimiter(None, 3),
+                               limits=LoopLimits(max_iterations=10))
+        check("quota exhaustion reported as its own stop reason",
+              res.stop_reason == "quota_exhausted", res.stop_reason)
 
 
 def test_promptset() -> None:
@@ -380,7 +569,7 @@ def test_report() -> None:
              "estimated_cost_usd": 0.3, "final_message": "Built it.",
              "build_ok": True, "screenshot": "screenshots/v1-kanban.png",
              "console_errors": [], "page_errors": [],
-             "app_url": "/web_app_testing/apps/v1-kanban/",
+             "app_url": "/apps/v1-kanban/",
              "transcript": "transcripts/v1-kanban.jsonl"},
             {"app_id": "v1-broken", "prompt_id": "broken", "title": "Broken",
              "prompt": "p", "status": "build_failed", "agent_stop_reason": "max_iterations",
@@ -388,7 +577,7 @@ def test_report() -> None:
              "estimated_cost_usd": 0.12, "build_ok": False,
              "build_log_tail": "TS2345: type error", "agent_error": "hit cap",
              "console_errors": ["boom"], "page_errors": [],
-             "app_url": "/web_app_testing/apps/v1-broken/"},
+             "app_url": "/apps/v1-broken/"},
         ],
     }
     html_out = report_mod.render(manifest)
@@ -413,16 +602,132 @@ def test_report() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_ab_report() -> None:
+    print("\nA/B comparison report")
+    def app(pair, variant, **kw):
+        base = {
+            "app_id": f"rw-{pair}-{variant}", "prompt_id": f"{pair}-{variant}",
+            "title": f"{pair.title()} — {variant}", "prompt": "word " * 40,
+            "pair": pair, "variant": variant, "status": "ok",
+            "agent_stop_reason": "end_turn", "iterations": 5, "elapsed_seconds": 60.0,
+            "usage": {"output_tokens": 1000}, "estimated_cost_usd": 0.2,
+            "build_ok": True, "screenshot": f"screenshots/rw-{pair}-{variant}.png",
+            "console_errors": [], "page_errors": [], "notes": "a direction",
+        }
+        base.update(kw)
+        return base
+
+    manifest = {
+        "run_id": "r", "promptset": {"id": "rw", "name": "Rewrites", "path": "p"},
+        "model": "claude-sonnet-5", "effort": "high", "duration_seconds": 10,
+        "finished_at": "x", "system_prompt": "si",
+        "totals": {"apps": 4, "ok": 4, "output_tokens": 4000,
+                   "estimated_cost_usd": 0.8},
+        "apps": [
+            app("tornado", "before", prompt="Show me a tornado"),
+            app("tornado", "after", prompt="Show me a tornado\n<DESIGN_INSTRUCTIONS>\nspec\n</DESIGN_INSTRUCTIONS>"),
+            app("wallet", "before"),
+            app("wallet", "after", build_ok=False, status="build_failed",
+                screenshot=None, build_log_tail="TS2345"),
+        ],
+    }
+    html_out = report_mod.render(manifest)
+    check("renders one section per pair", html_out.count('class="pair"') == 2,
+          str(html_out.count('class="pair"')))
+    check("renders two arms per pair", html_out.count('class="arm arm-') == 4)
+    check("labels the arms", "As typed" in html_out and "As rewritten" in html_out)
+    check("comparison table present", 'table class="cmp"' in html_out)
+    check("each arm has a prompt dropdown",
+          html_out.count("Prompt — as ") == 4, str(html_out.count("Prompt — as ")))
+    check("full rewritten prompt is in the dropdown",
+          "DESIGN_INSTRUCTIONS" in html_out)
+    check("live link per arm", html_out.count("Open the app") == 4)
+    check("failed arm's link is disabled", 'aria-disabled="true"' in html_out)
+    check("pair note surfaced", "a direction" in html_out)
+
+    # A promptset without pairs must still render the original card layout.
+    flat = {**manifest, "apps": [{**a, "pair": "", "variant": ""}
+                                 for a in manifest["apps"]]}
+    flat_html = report_mod.render(flat)
+    check("unpaired runs fall back to card layout",
+          'class="pair"' not in flat_html and 'class="card"' in flat_html)
+
+
+def test_rewrites_promptset() -> None:
+    print("\nrewrites-v1 promptset")
+    pset = Promptset.load(REPO_ROOT / "promptsets/rewrites-v1")
+    check("twelve prompts", len(pset.prompts) == 12, str(len(pset.prompts)))
+    pairs: dict[str, set[str]] = {}
+    for p in pset.prompts:
+        pairs.setdefault(p.pair, set()).add(p.variant)
+    check("six pairs", len(pairs) == 6, str(sorted(pairs)))
+    check("every pair has both arms",
+          all(v == {"before", "after"} for v in pairs.values()), str(pairs))
+
+    for p in pset.prompts:
+        if p.variant != "after":
+            continue
+        before = next(b for b in pset.prompts
+                      if b.pair == p.pair and b.variant == "before")
+        # The artifact's contract: the typed wording is never edited, the spec
+        # is appended beneath it.
+        check(f"{p.pair}: after starts with the verbatim original",
+              p.prompt.startswith(before.prompt.strip()), p.prompt[:60])
+        check(f"{p.pair}: after carries the spec block",
+              "<DESIGN_INSTRUCTIONS>" in p.prompt and
+              "</DESIGN_INSTRUCTIONS>" in p.prompt)
+
+
+def test_vercel_config() -> None:
+    print("\nvercel config")
+    from agent.site import VERCEL_CONFIG
+
+    rewrites = VERCEL_CONFIG.get("rewrites", [])
+    check("one SPA rewrite per app", len(rewrites) == 1, str(rewrites))
+    src, dst = rewrites[0]["source"], rewrites[0]["destination"]
+    check("rewrite is scoped to a single app id",
+          src == "/apps/:appId/(.*)" and dst == "/apps/:appId/index.html",
+          f"{src} -> {dst}")
+    check("rewrite cannot swallow the gallery index", not src.startswith("/(."),
+          src)
+    # Verified against real Vercel: `trailingSlash: true` normalizes the
+    # rewrite destination to `…/index.html/`, which 404s every SPA route.
+    check("trailingSlash is not set (it breaks the rewrite destination)",
+          "trailingSlash" not in VERCEL_CONFIG)
+
+    headers = VERCEL_CONFIG.get("headers", [])
+    sources = [h["source"] for h in headers]
+    immutable = [h for h in headers
+                 if any("immutable" in x["value"] for x in h["headers"])]
+    check("hashed assets are cached immutably", len(immutable) == 1, str(headers))
+    check("immutable rule targets only /assets/",
+          "/assets/" in immutable[0]["source"], immutable[0]["source"])
+    check("everything else must revalidate",
+          any(h["source"] == "/(.*)"
+              and "must-revalidate" in h["headers"][0]["value"] for h in headers))
+    # Verified against real Vercel: every matching rule applies and the LAST one
+    # wins per header key. Catch-all first, or assets silently get max-age=0.
+    check("catch-all header rule precedes the assets rule",
+          sources.index("/(.*)") < sources.index(immutable[0]["source"]),
+          str(sources))
+    check("config is JSON-serializable", bool(json.dumps(VERCEL_CONFIG)))
+
+
 def main() -> int:
     print("pipeline self-test (no API key required)")
     test_workspace()
     test_loop_tool_roundtrip()
     test_loop_tool_error()
     test_loop_pause_and_refusal()
+    test_loop_max_tokens_resume()
     test_loop_limits()
     test_transcript()
+    test_gemini_loop()
     test_promptset()
     test_report()
+    test_ab_report()
+    test_rewrites_promptset()
+    test_vercel_config()
 
     print()
     if failures:

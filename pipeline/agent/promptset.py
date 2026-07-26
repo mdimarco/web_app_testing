@@ -25,6 +25,10 @@ class Prompt:
     prompt: str
     title: str = ""
     notes: str = ""
+    # A/B support: prompts sharing a `pair` are variants of the same task and
+    # are rendered side by side in the report. `variant` labels the arm.
+    pair: str = ""
+    variant: str = ""
 
     def __post_init__(self) -> None:
         if not SLUG_RE.match(self.id):
@@ -86,6 +90,8 @@ class Promptset:
                     prompt=str(entry.get("prompt", "")),
                     title=str(entry.get("title", "")),
                     notes=str(entry.get("notes", "")),
+                    pair=str(entry.get("pair", "")),
+                    variant=str(entry.get("variant", "")),
                 )
             )
 

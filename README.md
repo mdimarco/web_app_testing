@@ -8,9 +8,9 @@ app, screenshots it, publishes it to a live URL, and produces an HTML report
 tying each prompt to its screenshot and a link you can click and interact with.
 
 ```
-promptsets/v1/  ──►  agent (Sonnet 5)  ──►  apps/v1-kanban/  ──►  GitHub Pages
-                          │                                            │
-                          └──► runs/<run-id>/  ──►  report.html ────────┘
+promptsets/v1/  ──►  agent (Sonnet 5)  ──►  apps/v1-kanban/  ──►  Vercel
+                          │                                         │
+                          └──► runs/<run-id>/  ──►  report.html ─────┘
 ```
 
 ---
@@ -22,10 +22,13 @@ promptsets/v1/  ──►  agent (Sonnet 5)  ──►  apps/v1-kanban/  ──�
 export ANTHROPIC_API_KEY=sk-ant-...       # or run `ant auth login`
 ./scripts/run_promptset.sh promptsets/v1  # build all six apps
 ./scripts/publish.sh --serve              # assemble site/, serve on :8080
+
+export VERCEL_TOKEN=...                   # vercel.com/account/tokens
+./scripts/deploy_vercel.sh                # put it on the internet
 ```
 
-The run prints a report path. Open `site/index.html` (or the served URL) for the
-gallery; push to `main` and GitHub Actions deploys the same tree to Pages.
+The run prints a report path. `--serve` gives you the gallery locally; the
+deploy script (or a push to `main`) puts the same tree on Vercel.
 
 To iterate on one app by hand afterwards:
 
@@ -41,7 +44,7 @@ To iterate on one app by hand afterwards:
 |---|---|
 | `template/` | Canonical React 18 + TS + Vite app. Every generated app starts as a copy. |
 | `docker/` | The standard app environment: one image, modes `dev`/`build`/`preview`, plus an nginx `gallery` service. |
-| `pipeline/agent/` | The agent: ReAct loop, tools, promptset loader, screenshotter, report and site generators. |
+| `pipeline/agent/` | The agents: two native ReAct loops (`loop.py` Anthropic, `gemini_loop.py` Gemini), shared tools, promptset loader, screenshotter, report and site generators. |
 | `promptsets/<version>/` | Versioned inputs. `promptset.yaml` + an optional `system_prompt.md`. |
 | `apps/<app-id>/` | Generated apps. Committed; `node_modules/` and `dist/` are not. |
 | `runs/<run-id>/` | Per-run `manifest.json`, `report.html`, screenshots, and JSONL transcripts. |
@@ -62,7 +65,7 @@ docker run --rm -v "$PWD/apps/v1-kanban:/app" -p 5173:5173 webapp-env dev
 
 # production build into apps/v1-kanban/dist
 docker run --rm -v "$PWD/apps/v1-kanban:/app" \
-  -e VITE_BASE=/web_app_testing/apps/v1-kanban/ webapp-env build
+  -e VITE_BASE=/apps/v1-kanban/ webapp-env build
 ```
 
 Or via compose / the wrapper:
@@ -77,41 +80,62 @@ so a host-side install never shadows the container's. Dependencies install on
 first start and are skipped on warm restarts.
 
 **`VITE_BASE` is the one thing to know.** Apps deploy to a subpath
-(`/web_app_testing/apps/<id>/`), so `vite.config.ts` reads its `base` from that
-env var — `/` locally, the deploy path in CI. Nothing in app source should
+(`/apps/<id>/`), so `vite.config.ts` reads its `base` from that env var — `/`
+locally, the deploy path when building for release. Nothing in app source should
 hardcode a path prefix, and assets must never be referenced as `/foo.png`.
 
 ---
 
 ## 2. Deployment — a link per app
 
-`scripts/publish.sh` assembles `site/`:
+Everything ships as **one Vercel project**: the gallery at the root, each app
+under `/apps/<id>/`.
 
 ```
+site/vercel.json                routing + caching (generated)
 site/index.html                 gallery of every app, with screenshots
 site/apps/<app-id>/             each app's built bundle
 site/runs/<run-id>/report.html  run reports
 ```
 
-Pushing to `main` triggers `.github/workflows/deploy-pages.yml`, which rebuilds
-every app with the correct base path, assembles the same tree, and deploys to
-Pages:
-
 ```
-https://mdimarco.github.io/web_app_testing/                        gallery
-https://mdimarco.github.io/web_app_testing/apps/v1-kanban/         a live app
-https://mdimarco.github.io/web_app_testing/runs/<run-id>/report.html
+https://<project>.vercel.app/                          gallery
+https://<project>.vercel.app/apps/v1-kanban/           a live app
+https://<project>.vercel.app/runs/<run-id>/report.html
 ```
 
-**One-time repo setting:** Settings → Pages → Source → **GitHub Actions**.
+**One-time setup:** create a token at
+[vercel.com/account/tokens](https://vercel.com/account/tokens), then either
+`export VERCEL_TOKEN=...` for local deploys, or add it as the `VERCEL_TOKEN`
+repository secret so pushes to `main` deploy automatically. The project is
+created on first deploy — nothing to click in the Vercel dashboard.
+
+```bash
+./scripts/deploy_vercel.sh              # production
+./scripts/deploy_vercel.sh --preview    # throwaway preview URL
+./scripts/deploy_vercel.sh --build      # rebuild every app first
+```
+
+Optional repo variables: `VERCEL_PROJECT` (default `web-app-testing`) and
+`VERCEL_SCOPE` (your team slug, if the project lives under a team rather than a
+personal account).
 
 A single app that fails to build is logged as a warning and skipped rather than
-failing the deploy, so one bad generation never blocks publishing the rest.
+failing the deploy, so one bad generation never blocks publishing the rest. If
+`VERCEL_TOKEN` is absent the workflow still builds and assembles the site — it
+just skips the upload with a warning, so you find out about build breakage
+either way.
+
+`site/vercel.json` is regenerated on every assemble. Its rewrite gives each app
+its own SPA fallback (`/apps/:id/*` → that app's `index.html`) scoped so one
+app's routes can't swallow another's, and it caches Vite's fingerprinted assets
+immutably while forcing everything else to revalidate.
 
 For a local equivalent of the deployed site:
 
 ```bash
-docker compose -f docker/docker-compose.yml up gallery   # :8080, with SPA fallback
+./scripts/publish.sh --serve                             # :8080
+docker compose -f docker/docker-compose.yml up gallery   # same, via nginx
 ```
 
 ---
@@ -145,6 +169,46 @@ Drop a `system_prompt.md` beside `promptset.yaml` to version the system
 instruction with the prompts; otherwise `pipeline/agent/system_prompt.md` is
 used. Either way the exact SI used is recorded in the run manifest and report.
 
+### Providers
+
+Two native harnesses. Not a shared abstraction with adapters — each speaks its
+provider's own primitives, and they meet only at `tools.Workspace` (the tool
+implementations) and `LoopResult` (what the runner and report consume).
+
+```bash
+./scripts/run_promptset.sh promptsets/v1                      # Anthropic (default)
+./scripts/run_promptset.sh promptsets/v1 --provider gemini    # Gemini
+./scripts/run_promptset.sh promptsets/v1 --provider gemini --model gemini-2.5-pro
+```
+
+| | `loop.py` (Anthropic) | `gemini_loop.py` (Gemini) |
+|---|---|---|
+| SDK | `anthropic` | `google-genai` |
+| Auth | `ANTHROPIC_API_KEY` | `GEMINI_API_KEY` or `GOOGLE_API_KEY` |
+| Tool call | `tool_use` block, correlated by `tool_use_id` | `function_call` part, correlated by **name** |
+| Tool result | `tool_result` block | `function_response` part in a `user` Content |
+| Reasoning depth | `output_config.effort` | `ThinkingConfig.thinking_level` |
+| Caching | explicit `cache_control` breakpoint | implicit on 2.5 models — nothing to place |
+| Web search | `web_search_20260209` server tool | `Tool(google_search=...)` grounding |
+| Truncation | `stop_reason: max_tokens` | `finish_reason: MAX_TOKENS` |
+
+`--effort` is the shared vocabulary; the Gemini loop maps it onto
+`ThinkingLevel` (`low`→`MINIMAL` … `xhigh`/`max`→`HIGH`). Passing `--provider`
+makes the runner ignore a promptset's pinned model when it belongs to the other
+provider, so `model: claude-sonnet-5` is never handed to Gemini.
+
+**Gemini free tier is rate-limited hard enough that it shapes the design.**
+`gemini_loop.py` paces requests client-side against published per-model RPM and
+RPD quotas, and raises `quota_exhausted` as a distinct stop reason rather than
+letting the daily cap surface as a string of opaque 429s. Budget accordingly: a
+rewritten-prompt app takes 70–90 requests, so on `gemini-2.5-pro` (100/day) one
+app is roughly a full day of free quota. Pass `free_tier=False` on a paid key to
+drop the pacing.
+
+⚠️ **Switching providers invalidates an in-flight A/B comparison.** The model is
+a controlled variable — a Gemini "after" cannot be compared against an Anthropic
+"before". Re-run both arms on the same provider.
+
 **The harness** (`pipeline/agent/loop.py`) is a hand-written ReAct loop —
 request → tool calls → results → repeat — chosen over the SDK's tool runner so
 every step is logged and the iteration, token, and wall-clock ceilings are ours.
@@ -159,7 +223,7 @@ Tools:
 | `write_file` | client | Full-file write, creates parent dirs. |
 | `npm_build` | client | Install + `tsc` + `vite build`. The agent's correctness signal. |
 | `bash` | client | Runs in the app dir. |
-| `web_search` | **server** | Anthropic-hosted (`web_search_20260209`); nothing executes locally. |
+| `web_search` | **server** | Anthropic-hosted `web_search_20260209`, or Gemini `google_search` grounding; nothing executes locally. |
 
 Every client tool is sandboxed to the app directory: paths are resolved and
 checked against the workspace root, so `../../etc/passwd` is rejected.
@@ -194,7 +258,7 @@ subpath, so a broken `base` or an absolute asset URL shows up as a blank
 screenshot here rather than after deploy. Console and page errors observed
 during capture are recorded and surfaced on the card.
 
-Links are relative, so the same file works locally and on Pages. Regenerate a
+Links are relative, so the same file works locally and deployed. Regenerate a
 report from an existing manifest without re-running the agent:
 
 ```bash
@@ -234,7 +298,7 @@ a full `npm install` per app. Re-run it after changing `template/package.json`.
 ## Notes and limits
 
 - **Apps are client-side only.** No backend, no runtime network calls, no API
-  keys — the output is static files on Pages. The system prompt states this, and
+  keys — the output is static files on a CDN. The system prompt states this, and
   prompts should assume it.
 - **Cost.** Sonnet 5 at `high` effort runs roughly $0.20–0.60 per app depending
   on how many build-fix cycles it needs; the report shows a per-run estimate.

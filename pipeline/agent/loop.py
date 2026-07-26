@@ -91,6 +91,8 @@ class LoopResult:
     error: str | None = None
     transcript_path: Path | None = None
     tool_call_counts: dict[str, int] = field(default_factory=dict)
+    # Priced by the provider's own loop — Anthropic and Gemini rates differ.
+    cost_usd: float = 0.0
 
     @property
     def ok(self) -> bool:
@@ -270,8 +272,30 @@ def run_agent(
                                    error="turn still paused after max_pause_resumes")
                 continue
 
+            # A turn that hits the per-turn cap was cut off mid-thought, not
+            # finished. Resume it rather than failing the run: drop the trailing
+            # tool_use (its input JSON is truncated, and an unanswered tool_use
+            # is rejected on the next request) and ask for a continuation.
+            if response.stop_reason == "max_tokens":
+                truncated = messages[-1]["content"]
+                while truncated and truncated[-1].get("type") == "tool_use":
+                    truncated.pop()
+                if not truncated:
+                    messages.pop()
+                if tracer:
+                    tracer.event("max_tokens_resume", iteration=iteration)
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "Your previous response hit the output token limit and was "
+                        "cut off. Continue from exactly where you stopped. If you "
+                        "were partway through a tool call, start that call again."
+                    ),
+                })
+                continue
+
             if response.stop_reason != "tool_use":
-                # end_turn, max_tokens, stop_sequence — the model is done talking.
+                # end_turn, stop_sequence — the model is done talking.
                 reason = "end_turn" if response.stop_reason == "end_turn" else "error"
                 err = None if reason == "end_turn" else f"stopped: {response.stop_reason}"
                 return _finish(reason, iteration, usage, final_text, started,
@@ -355,6 +379,13 @@ def _create_with_retries(
                 tools=tools,
                 output_config={"effort": effort},
                 thinking={"type": "adaptive"},
+                # Roll a breakpoint onto the last block of the newest turn so
+                # each request reuses the whole prior conversation. Without
+                # this only the system prompt caches, and an agentic loop
+                # re-reads its entire growing history at full price every turn
+                # — measured at ~11% cache hits and 3.3M uncached input tokens
+                # on a 48-iteration run.
+                cache_control={"type": "ephemeral"},
             ) as stream:
                 return stream.get_final_message()
         except (anthropic.RateLimitError, anthropic.InternalServerError,
@@ -401,4 +432,5 @@ def _finish(
         error=error,
         transcript_path=trace_path,
         tool_call_counts=tool_counts,
+        cost_usd=usage.estimated_cost_usd(),
     )

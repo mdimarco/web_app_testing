@@ -1,0 +1,1 @@
+{"root":["./src/App.tsx","./src/main.tsx","./src/game/battleEngine.ts","./src/game/items.ts","./src/game/maps.ts","./src/game/monsters.ts","./src/game/spriteData.ts","./src/game/sprites.ts","./src/game/types.ts"],"checkPending":true,"version":"5.9.3"}
