@@ -271,6 +271,43 @@ def test_loop_pause_and_refusal() -> None:
         check("refusal category recorded", "cyber" in (res.error or ""), str(res.error))
 
 
+def test_loop_max_tokens_resume() -> None:
+    print("\nReAct loop — truncated turn resumes")
+    with temp_app() as app:
+        # Turn 1 is cut off mid-tool-call; the loop must drop the incomplete
+        # tool_use and ask for a continuation rather than failing the run.
+        client = FakeClient([
+            FakeResponse([text_block("Writing the comp"),
+                          tool_block("t1", "write_file", {"path": "src/A.tsx"})],
+                         "max_tokens"),
+            FakeResponse([text_block("resumed and finished")], "end_turn"),
+        ])
+        res = run_agent(prompt="p", system_prompt="SI", workspace=Workspace(root=app),
+                        client=client, echo=False)
+        check("truncated turn does not fail the run", res.ok, res.stop_reason)
+        sent = client.requests[1]["messages"]
+        assistant = sent[-2]
+        check("incomplete tool_use stripped from the echoed turn",
+              all(b.get("type") != "tool_use" for b in assistant["content"]),
+              json.dumps(assistant)[:200])
+        check("continuation prompt appended",
+              sent[-1]["role"] == "user" and "cut off" in sent[-1]["content"])
+
+    with temp_app() as app:
+        # A turn whose entire content was a truncated tool_use leaves nothing to
+        # echo; the empty assistant message must be removed, not sent.
+        client = FakeClient([
+            FakeResponse([tool_block("t1", "write_file", {"path": "x"})], "max_tokens"),
+            FakeResponse([text_block("ok")], "end_turn"),
+        ])
+        res = run_agent(prompt="p", system_prompt="SI", workspace=Workspace(root=app),
+                        client=client, echo=False)
+        check("empty truncated turn dropped entirely", res.ok, res.stop_reason)
+        check("no empty assistant message sent",
+              all(m["role"] != "assistant" or m["content"]
+                  for m in client.requests[1]["messages"]))
+
+
 def test_loop_limits() -> None:
     print("\nReAct loop — budget ceilings")
     with temp_app() as app:
@@ -530,6 +567,7 @@ def main() -> int:
     test_loop_tool_roundtrip()
     test_loop_tool_error()
     test_loop_pause_and_refusal()
+    test_loop_max_tokens_resume()
     test_loop_limits()
     test_transcript()
     test_promptset()

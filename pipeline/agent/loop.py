@@ -270,8 +270,30 @@ def run_agent(
                                    error="turn still paused after max_pause_resumes")
                 continue
 
+            # A turn that hits the per-turn cap was cut off mid-thought, not
+            # finished. Resume it rather than failing the run: drop the trailing
+            # tool_use (its input JSON is truncated, and an unanswered tool_use
+            # is rejected on the next request) and ask for a continuation.
+            if response.stop_reason == "max_tokens":
+                truncated = messages[-1]["content"]
+                while truncated and truncated[-1].get("type") == "tool_use":
+                    truncated.pop()
+                if not truncated:
+                    messages.pop()
+                if tracer:
+                    tracer.event("max_tokens_resume", iteration=iteration)
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "Your previous response hit the output token limit and was "
+                        "cut off. Continue from exactly where you stopped. If you "
+                        "were partway through a tool call, start that call again."
+                    ),
+                })
+                continue
+
             if response.stop_reason != "tool_use":
-                # end_turn, max_tokens, stop_sequence — the model is done talking.
+                # end_turn, stop_sequence — the model is done talking.
                 reason = "end_turn" if response.stop_reason == "end_turn" else "error"
                 err = None if reason == "end_turn" else f"stopped: {response.stop_reason}"
                 return _finish(reason, iteration, usage, final_text, started,
