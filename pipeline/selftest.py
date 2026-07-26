@@ -359,6 +359,158 @@ def test_transcript() -> None:
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_gemini_loop() -> None:
+    """Drive the native Gemini loop with a stubbed google-genai client."""
+    print("\nGemini loop (native primitives)")
+    from google.genai import types as gt
+
+    from agent.gemini_loop import (EFFORT_TO_THINKING_LEVEL, QuotaExhausted,
+                                   RateLimiter, run_agent_gemini)
+
+    def resp(parts, finish="STOP", cached=0):
+        return gt.GenerateContentResponse(
+            candidates=[gt.Candidate(
+                content=gt.Content(role="model", parts=parts), finish_reason=finish)],
+            usage_metadata=gt.GenerateContentResponseUsageMetadata(
+                prompt_token_count=1000, cached_content_token_count=cached,
+                candidates_token_count=200, thoughts_token_count=50),
+        )
+
+    class FakeModels:
+        def __init__(self, script, sink):
+            self.script, self.sink = list(script), sink
+
+        def generate_content(self, *, model, contents, config):
+            self.sink.append({"model": model, "config": config,
+                              "contents": copy.deepcopy(contents)})
+            if not self.script:
+                raise AssertionError("loop asked for more turns than scripted")
+            return self.script.pop(0)
+
+    class FakeGenaiClient:
+        def __init__(self, script):
+            self.requests = []
+            self.models = FakeModels(script, self.requests)
+
+    with temp_app() as app:
+        client = FakeGenaiClient([
+            resp([gt.Part.from_text(text="Writing it."),
+                  gt.Part.from_function_call(
+                      name="write_file",
+                      args={"path": "src/App.tsx", "content": "export default () => null\n"}),
+                  gt.Part.from_function_call(name="read_file", args={"path": "package.json"})]),
+            resp([gt.Part.from_text(text="Done — builds clean.")], cached=800),
+        ])
+        res = run_agent_gemini(
+            prompt="build it", system_prompt="SI", workspace=Workspace(root=app),
+            client=client, echo=False, free_tier=False,
+            limits=LoopLimits(max_iterations=5))
+
+        check("reaches end_turn", res.stop_reason == "end_turn", res.stop_reason)
+        check("function_call actually executed",
+              (app / "src/App.tsx").read_text().strip().endswith("=> null"))
+        check("both calls counted",
+              res.tool_call_counts == {"write_file": 1, "read_file": 1},
+              str(res.tool_call_counts))
+        check("final text captured", "Done" in res.final_text, res.final_text)
+        check("thinking tokens billed as output", res.usage.output_tokens == 500,
+              str(res.usage.output_tokens))
+        check("cached tokens split out of prompt count",
+              res.usage.cache_read_input_tokens == 800
+              and res.usage.input_tokens == 1000 + 200,
+              f"{res.usage.cache_read_input_tokens}/{res.usage.input_tokens}")
+        check("priced with Gemini rates, not Anthropic",
+              0 < res.cost_usd < 0.01, f"${res.cost_usd:.5f}")
+
+        cfg = client.requests[0]["config"]
+        decl = cfg.tools[0].function_declarations
+        check("client tools sent as function_declarations",
+              {d.name for d in decl} == {"read_file", "write_file", "npm_build", "bash"},
+              str([d.name for d in decl]))
+        check("tool schemas reused verbatim as JSON Schema",
+              any(d.parameters_json_schema for d in decl))
+        check("google_search grounding attached",
+              any(t.google_search is not None for t in cfg.tools))
+        check("SDK auto function-calling disabled",
+              cfg.automatic_function_calling.disable is True)
+        check("effort mapped to a ThinkingLevel",
+              str(cfg.thinking_config.thinking_level).endswith(
+                  EFFORT_TO_THINKING_LEVEL["high"]),
+              str(cfg.thinking_config.thinking_level))
+        check("system prompt sent as system_instruction",
+              cfg.system_instruction == "SI")
+
+        # Results must go back as function_response parts in one user Content.
+        second = client.requests[1]["contents"]
+        check("model turn echoed back", second[-2].role == "model")
+        check("results batched into one user Content",
+              second[-1].role == "user" and len(second[-1].parts) == 2)
+        check("results are function_response parts",
+              all(p.function_response is not None for p in second[-1].parts))
+        check("responses keyed by function name",
+              {p.function_response.name for p in second[-1].parts}
+              == {"write_file", "read_file"})
+
+    with temp_app() as app:
+        # A failing tool must come back as a function_response, not an exception.
+        client = FakeGenaiClient([
+            resp([gt.Part.from_function_call(name="read_file",
+                                             args={"path": "../../etc/passwd"})]),
+            resp([gt.Part.from_text(text="understood")]),
+        ])
+        res = run_agent_gemini(prompt="p", system_prompt="SI",
+                               workspace=Workspace(root=app), client=client,
+                               echo=False, free_tier=False)
+        check("tool error survives the turn", res.ok, res.stop_reason)
+        fr = client.requests[1]["contents"][-1].parts[0].function_response
+        check("error returned in the response payload",
+              "escapes" in str(fr.response.get("error", "")), str(fr.response)[:120])
+
+    with temp_app() as app:
+        # MAX_TOKENS is a truncated turn, not a finished one.
+        client = FakeGenaiClient([
+            resp([gt.Part.from_text(text="half a thou")], finish="MAX_TOKENS"),
+            resp([gt.Part.from_text(text="finished")]),
+        ])
+        res = run_agent_gemini(prompt="p", system_prompt="SI",
+                               workspace=Workspace(root=app), client=client,
+                               echo=False, free_tier=False)
+        check("MAX_TOKENS resumes rather than failing", res.ok, res.stop_reason)
+        check("continuation prompt appended",
+              "cut off" in client.requests[1]["contents"][-1].parts[0].text)
+
+    with temp_app() as app:
+        client = FakeGenaiClient([resp([gt.Part.from_text(text="no")],
+                                       finish="SAFETY")])
+        res = run_agent_gemini(prompt="p", system_prompt="SI",
+                               workspace=Workspace(root=app), client=client,
+                               echo=False, free_tier=False)
+        check("SAFETY reported as a refusal", res.stop_reason == "refusal",
+              res.stop_reason)
+
+    # Free-tier pacing: the daily cap must stop the run with a clear reason
+    # rather than surfacing as a string of opaque 429s.
+    rl = RateLimiter(rpm=1000, rpd=2)
+    rl.acquire(); rl.acquire()
+    try:
+        rl.acquire()
+        check("daily quota raises QuotaExhausted", False, "no error raised")
+    except QuotaExhausted:
+        check("daily quota raises QuotaExhausted", True)
+
+    with temp_app() as app:
+        client = FakeGenaiClient([
+            resp([gt.Part.from_function_call(name="bash", args={"command": "true"})])
+            for _ in range(5)
+        ])
+        res = run_agent_gemini(prompt="p", system_prompt="SI",
+                               workspace=Workspace(root=app), client=client,
+                               echo=False, rate_limiter=RateLimiter(None, 3),
+                               limits=LoopLimits(max_iterations=10))
+        check("quota exhaustion reported as its own stop reason",
+              res.stop_reason == "quota_exhausted", res.stop_reason)
+
+
 def test_promptset() -> None:
     print("\npromptset loading")
     pset = Promptset.load(REPO_ROOT / "promptsets/v1")
@@ -570,6 +722,7 @@ def main() -> int:
     test_loop_max_tokens_resume()
     test_loop_limits()
     test_transcript()
+    test_gemini_loop()
     test_promptset()
     test_report()
     test_ab_report()

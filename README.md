@@ -44,7 +44,7 @@ To iterate on one app by hand afterwards:
 |---|---|
 | `template/` | Canonical React 18 + TS + Vite app. Every generated app starts as a copy. |
 | `docker/` | The standard app environment: one image, modes `dev`/`build`/`preview`, plus an nginx `gallery` service. |
-| `pipeline/agent/` | The agent: ReAct loop, tools, promptset loader, screenshotter, report and site generators. |
+| `pipeline/agent/` | The agents: two native ReAct loops (`loop.py` Anthropic, `gemini_loop.py` Gemini), shared tools, promptset loader, screenshotter, report and site generators. |
 | `promptsets/<version>/` | Versioned inputs. `promptset.yaml` + an optional `system_prompt.md`. |
 | `apps/<app-id>/` | Generated apps. Committed; `node_modules/` and `dist/` are not. |
 | `runs/<run-id>/` | Per-run `manifest.json`, `report.html`, screenshots, and JSONL transcripts. |
@@ -169,6 +169,46 @@ Drop a `system_prompt.md` beside `promptset.yaml` to version the system
 instruction with the prompts; otherwise `pipeline/agent/system_prompt.md` is
 used. Either way the exact SI used is recorded in the run manifest and report.
 
+### Providers
+
+Two native harnesses. Not a shared abstraction with adapters — each speaks its
+provider's own primitives, and they meet only at `tools.Workspace` (the tool
+implementations) and `LoopResult` (what the runner and report consume).
+
+```bash
+./scripts/run_promptset.sh promptsets/v1                      # Anthropic (default)
+./scripts/run_promptset.sh promptsets/v1 --provider gemini    # Gemini
+./scripts/run_promptset.sh promptsets/v1 --provider gemini --model gemini-2.5-pro
+```
+
+| | `loop.py` (Anthropic) | `gemini_loop.py` (Gemini) |
+|---|---|---|
+| SDK | `anthropic` | `google-genai` |
+| Auth | `ANTHROPIC_API_KEY` | `GEMINI_API_KEY` or `GOOGLE_API_KEY` |
+| Tool call | `tool_use` block, correlated by `tool_use_id` | `function_call` part, correlated by **name** |
+| Tool result | `tool_result` block | `function_response` part in a `user` Content |
+| Reasoning depth | `output_config.effort` | `ThinkingConfig.thinking_level` |
+| Caching | explicit `cache_control` breakpoint | implicit on 2.5 models — nothing to place |
+| Web search | `web_search_20260209` server tool | `Tool(google_search=...)` grounding |
+| Truncation | `stop_reason: max_tokens` | `finish_reason: MAX_TOKENS` |
+
+`--effort` is the shared vocabulary; the Gemini loop maps it onto
+`ThinkingLevel` (`low`→`MINIMAL` … `xhigh`/`max`→`HIGH`). Passing `--provider`
+makes the runner ignore a promptset's pinned model when it belongs to the other
+provider, so `model: claude-sonnet-5` is never handed to Gemini.
+
+**Gemini free tier is rate-limited hard enough that it shapes the design.**
+`gemini_loop.py` paces requests client-side against published per-model RPM and
+RPD quotas, and raises `quota_exhausted` as a distinct stop reason rather than
+letting the daily cap surface as a string of opaque 429s. Budget accordingly: a
+rewritten-prompt app takes 70–90 requests, so on `gemini-2.5-pro` (100/day) one
+app is roughly a full day of free quota. Pass `free_tier=False` on a paid key to
+drop the pacing.
+
+⚠️ **Switching providers invalidates an in-flight A/B comparison.** The model is
+a controlled variable — a Gemini "after" cannot be compared against an Anthropic
+"before". Re-run both arms on the same provider.
+
 **The harness** (`pipeline/agent/loop.py`) is a hand-written ReAct loop —
 request → tool calls → results → repeat — chosen over the SDK's tool runner so
 every step is logged and the iteration, token, and wall-clock ceilings are ours.
@@ -183,7 +223,7 @@ Tools:
 | `write_file` | client | Full-file write, creates parent dirs. |
 | `npm_build` | client | Install + `tsc` + `vite build`. The agent's correctness signal. |
 | `bash` | client | Runs in the app dir. |
-| `web_search` | **server** | Anthropic-hosted (`web_search_20260209`); nothing executes locally. |
+| `web_search` | **server** | Anthropic-hosted `web_search_20260209`, or Gemini `google_search` grounding; nothing executes locally. |
 
 Every client tool is sandboxed to the app directory: paths are resolved and
 checked against the workspace root, so `../../etc/passwd` is rejected.

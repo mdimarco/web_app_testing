@@ -19,6 +19,8 @@ import anthropic
 
 from . import report as report_mod
 from . import screenshot
+from .gemini_loop import DEFAULT_MODEL as GEMINI_DEFAULT_MODEL
+from .gemini_loop import run_agent_gemini
 from .loop import DEFAULT_MODEL, LoopLimits, run_agent
 from .promptset import Prompt, Promptset
 from .tools import Workspace
@@ -60,6 +62,12 @@ class AppResult:
     page_errors: list[str] = field(default_factory=list)
     app_url: str = ""
     transcript: str | None = None
+
+
+def _model_matches(model: str, provider: str) -> bool:
+    """True when a model id belongs to the given provider's family."""
+    return model.startswith("gemini") if provider == "gemini" else \
+        model.startswith(("claude", "anthropic."))
 
 
 def _now_slug() -> str:
@@ -144,6 +152,7 @@ def run_one(
     enable_web_search: bool,
     force: bool,
     echo: bool,
+    provider: str = "anthropic",
 ) -> AppResult:
     app_dir = APPS_DIR / app_id
     base = f"{site_prefix.rstrip('/')}/apps/{app_id}/"
@@ -169,7 +178,8 @@ def run_one(
     trace_path = run_dir / "transcripts" / f"{app_id}.jsonl"
     workspace = Workspace(root=app_dir)
 
-    loop_result = run_agent(
+    driver = run_agent_gemini if provider == "gemini" else run_agent
+    loop_result = driver(
         prompt=prompt.prompt,
         system_prompt=system_prompt,
         workspace=workspace,
@@ -186,7 +196,7 @@ def run_one(
     result.iterations = loop_result.iterations
     result.elapsed_seconds = round(loop_result.elapsed_seconds, 1)
     result.usage = loop_result.usage.as_dict()
-    result.estimated_cost_usd = round(loop_result.usage.estimated_cost_usd(), 4)
+    result.estimated_cost_usd = round(loop_result.cost_usd, 4)
     result.tool_call_counts = loop_result.tool_call_counts
     result.final_message = loop_result.final_text
     result.transcript = str(trace_path.relative_to(run_dir))
@@ -234,7 +244,10 @@ def main(argv: list[str] | None = None) -> int:
         description="Run a versioned promptset through the app-building agent.",
     )
     ap.add_argument("promptset", help="Path to a promptset directory or promptset.yaml")
-    ap.add_argument("--model", default=None, help=f"default: {DEFAULT_MODEL}")
+    ap.add_argument("--provider", default=None, choices=["anthropic", "gemini"],
+                    help="Which native loop to drive (default: anthropic)")
+    ap.add_argument("--model", default=None,
+                    help=f"default: {DEFAULT_MODEL} / {GEMINI_DEFAULT_MODEL}")
     ap.add_argument("--effort", default=None,
                     choices=["low", "medium", "high", "xhigh", "max"])
     ap.add_argument("--only", nargs="*", metavar="PROMPT_ID",
@@ -264,7 +277,17 @@ def main(argv: list[str] | None = None) -> int:
 
     pset = Promptset.load(args.promptset)
     defaults = pset.defaults
-    model = args.model or defaults.get("model") or DEFAULT_MODEL
+    provider = args.provider or defaults.get("provider") or "anthropic"
+    provider_default = GEMINI_DEFAULT_MODEL if provider == "gemini" else DEFAULT_MODEL
+    # A promptset's pinned model belongs to its provider; ignore it when the
+    # caller switches providers on the command line, or Gemini would be handed
+    # "claude-sonnet-5".
+    pinned = defaults.get("model")
+    if args.provider and pinned and not _model_matches(pinned, provider):
+        print(f"note: ignoring promptset model {pinned!r} for provider "
+              f"{provider!r}; using {provider_default!r}", file=sys.stderr)
+        pinned = None
+    model = args.model or pinned or provider_default
     effort = args.effort or defaults.get("effort") or "high"
     limits = LoopLimits(
         max_iterations=args.max_iterations
@@ -302,7 +325,8 @@ def main(argv: list[str] | None = None) -> int:
     suffix = f"-{args.tag}" if args.tag else ""
     started = time.time()
 
-    print(f"run {run_id}: {len(prompts)} prompt(s), model={model}, effort={effort}")
+    print(f"run {run_id}: {len(prompts)} prompt(s), provider={provider}, "
+          f"model={model}, effort={effort}")
 
     def task(p: Prompt) -> AppResult:
         return run_one(
@@ -317,6 +341,7 @@ def main(argv: list[str] | None = None) -> int:
             enable_web_search=enable_web_search,
             force=args.force,
             echo=not args.quiet,
+            provider=provider,
         )
 
     results: list[AppResult] = []
@@ -372,6 +397,7 @@ def main(argv: list[str] | None = None) -> int:
             "description": pset.description,
             "path": str(pset.path.relative_to(REPO_ROOT)),
         },
+        "provider": provider,
         "model": model,
         "effort": effort,
         "web_search": enable_web_search,

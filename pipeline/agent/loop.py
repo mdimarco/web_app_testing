@@ -91,6 +91,8 @@ class LoopResult:
     error: str | None = None
     transcript_path: Path | None = None
     tool_call_counts: dict[str, int] = field(default_factory=dict)
+    # Priced by the provider's own loop — Anthropic and Gemini rates differ.
+    cost_usd: float = 0.0
 
     @property
     def ok(self) -> bool:
@@ -430,4 +432,5 @@ def _finish(
         error=error,
         transcript_path=trace_path,
         tool_call_counts=tool_counts,
+        cost_usd=usage.estimated_cost_usd(),
     )
