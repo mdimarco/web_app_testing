@@ -413,6 +413,82 @@ def test_report() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_ab_report() -> None:
+    print("\nA/B comparison report")
+    def app(pair, variant, **kw):
+        base = {
+            "app_id": f"rw-{pair}-{variant}", "prompt_id": f"{pair}-{variant}",
+            "title": f"{pair.title()} — {variant}", "prompt": "word " * 40,
+            "pair": pair, "variant": variant, "status": "ok",
+            "agent_stop_reason": "end_turn", "iterations": 5, "elapsed_seconds": 60.0,
+            "usage": {"output_tokens": 1000}, "estimated_cost_usd": 0.2,
+            "build_ok": True, "screenshot": f"screenshots/rw-{pair}-{variant}.png",
+            "console_errors": [], "page_errors": [], "notes": "a direction",
+        }
+        base.update(kw)
+        return base
+
+    manifest = {
+        "run_id": "r", "promptset": {"id": "rw", "name": "Rewrites", "path": "p"},
+        "model": "claude-sonnet-5", "effort": "high", "duration_seconds": 10,
+        "finished_at": "x", "system_prompt": "si",
+        "totals": {"apps": 4, "ok": 4, "output_tokens": 4000,
+                   "estimated_cost_usd": 0.8},
+        "apps": [
+            app("tornado", "before", prompt="Show me a tornado"),
+            app("tornado", "after", prompt="Show me a tornado\n<DESIGN_INSTRUCTIONS>\nspec\n</DESIGN_INSTRUCTIONS>"),
+            app("wallet", "before"),
+            app("wallet", "after", build_ok=False, status="build_failed",
+                screenshot=None, build_log_tail="TS2345"),
+        ],
+    }
+    html_out = report_mod.render(manifest)
+    check("renders one section per pair", html_out.count('class="pair"') == 2,
+          str(html_out.count('class="pair"')))
+    check("renders two arms per pair", html_out.count('class="arm arm-') == 4)
+    check("labels the arms", "As typed" in html_out and "As rewritten" in html_out)
+    check("comparison table present", 'table class="cmp"' in html_out)
+    check("each arm has a prompt dropdown",
+          html_out.count("Prompt — as ") == 4, str(html_out.count("Prompt — as ")))
+    check("full rewritten prompt is in the dropdown",
+          "DESIGN_INSTRUCTIONS" in html_out)
+    check("live link per arm", html_out.count("Open the app") == 4)
+    check("failed arm's link is disabled", 'aria-disabled="true"' in html_out)
+    check("pair note surfaced", "a direction" in html_out)
+
+    # A promptset without pairs must still render the original card layout.
+    flat = {**manifest, "apps": [{**a, "pair": "", "variant": ""}
+                                 for a in manifest["apps"]]}
+    flat_html = report_mod.render(flat)
+    check("unpaired runs fall back to card layout",
+          'class="pair"' not in flat_html and 'class="card"' in flat_html)
+
+
+def test_rewrites_promptset() -> None:
+    print("\nrewrites-v1 promptset")
+    pset = Promptset.load(REPO_ROOT / "promptsets/rewrites-v1")
+    check("twelve prompts", len(pset.prompts) == 12, str(len(pset.prompts)))
+    pairs: dict[str, set[str]] = {}
+    for p in pset.prompts:
+        pairs.setdefault(p.pair, set()).add(p.variant)
+    check("six pairs", len(pairs) == 6, str(sorted(pairs)))
+    check("every pair has both arms",
+          all(v == {"before", "after"} for v in pairs.values()), str(pairs))
+
+    for p in pset.prompts:
+        if p.variant != "after":
+            continue
+        before = next(b for b in pset.prompts
+                      if b.pair == p.pair and b.variant == "before")
+        # The artifact's contract: the typed wording is never edited, the spec
+        # is appended beneath it.
+        check(f"{p.pair}: after starts with the verbatim original",
+              p.prompt.startswith(before.prompt.strip()), p.prompt[:60])
+        check(f"{p.pair}: after carries the spec block",
+              "<DESIGN_INSTRUCTIONS>" in p.prompt and
+              "</DESIGN_INSTRUCTIONS>" in p.prompt)
+
+
 def test_vercel_config() -> None:
     print("\nvercel config")
     from agent.site import VERCEL_CONFIG
@@ -458,6 +534,8 @@ def main() -> int:
     test_transcript()
     test_promptset()
     test_report()
+    test_ab_report()
+    test_rewrites_promptset()
     test_vercel_config()
 
     print()

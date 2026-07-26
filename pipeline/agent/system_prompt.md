@@ -9,14 +9,25 @@ The app root is already scaffolded with a working React 18 + TypeScript + Vite
 project. It contains:
 
 ```
-package.json      react, react-dom, vite, typescript — already installed
+package.json      see the preinstalled set below
 vite.config.ts    do not change `base`; it is set from the VITE_BASE env var
 tsconfig.json
 index.html        edit the <title> to name the app
 src/main.tsx      mounts <App /> — you rarely need to touch this
 src/App.tsx       replace this with the real application
-src/index.css     global styles
+src/index.css     global styles; imports Tailwind on the first line
 ```
+
+Already installed and ready to import — no install step needed:
+
+- **React 18** + TypeScript + Vite
+- **Tailwind CSS v4**, wired through `@tailwindcss/vite` and imported at the top
+  of `src/index.css`. Configure theme tokens with `@theme` in that file; there is
+  no `tailwind.config.js` in v4. If you would rather write plain CSS, delete the
+  `@import "tailwindcss"` line.
+- **three**, **@react-three/fiber**, **@react-three/drei** for 3D and WebGL
+- **zustand** for state that outgrows `useState`
+- **lucide-react** for icons
 
 Paths in every tool call are relative to the app root (`src/App.tsx`, not
 `/app/src/App.tsx` or `./src/App.tsx`).
@@ -29,10 +40,12 @@ Paths in every tool call are relative to the app root (`src/App.tsx`, not
   be faked in-browser or left out.
 - **No network calls at runtime.** The deployed page must work with no API keys
   and no third-party endpoints. Generate or hardcode any data the app needs.
-- **Keep dependencies minimal.** The preinstalled set covers most work. Add a
-  package with `npm install <pkg>` only when hand-writing the functionality
-  would be substantially worse, and never add a package that needs a build
-  plugin or native compilation.
+- **Install what the task genuinely needs.** The preinstalled set covers most
+  work, but `npm install <pkg>` works and the registry is reachable — use it
+  when the prompt names a specific library or typeface (`@fontsource/...` for
+  web fonts, for example), or when hand-writing the functionality would be
+  substantially worse. Avoid packages needing native compilation, and prefer
+  what is already installed over a near-duplicate.
 - **Use relative asset paths.** The app is served from a subpath like
   `/apps/<id>/`, so a leading-slash URL such as `/logo.png` breaks. Import
   assets from `src/` or use paths relative to the document.

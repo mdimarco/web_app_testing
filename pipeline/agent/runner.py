@@ -42,6 +42,9 @@ class AppResult:
     title: str
     prompt: str
     status: str                      # "ok" | "build_failed" | "agent_failed" | "error"
+    pair: str = ""                   # apps sharing a pair are A/B variants
+    variant: str = ""                # e.g. "before" / "after"
+    notes: str = ""                  # free-text label carried from the promptset
     agent_stop_reason: str = ""
     agent_error: str | None = None
     iterations: int = 0
@@ -131,6 +134,9 @@ def run_one(
         title=prompt.title,
         prompt=prompt.prompt,
         status="error",
+        pair=prompt.pair,
+        variant=prompt.variant,
+        notes=prompt.notes,
         app_url=base,
     )
 
@@ -297,6 +303,7 @@ def main(argv: list[str] | None = None) -> int:
                         AppResult(
                             app_id=f"{pset.id}-{p.id}{suffix}", prompt_id=p.id,
                             title=p.title, prompt=p.prompt, status="error",
+                            pair=p.pair, variant=p.variant, notes=p.notes,
                             agent_error=f"{type(exc).__name__}: {exc}",
                         )
                     )
