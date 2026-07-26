@@ -64,15 +64,35 @@ DEPLOY_ARGS=(deploy --yes --cwd site --token "$VERCEL_TOKEN" "${SCOPE_ARGS[@]}")
 [[ $PROD -eq 1 ]] && DEPLOY_ARGS+=(--prod)
 
 echo "==> deploying site/"
-# The CLI prints the deployment URL to stdout and progress to stderr.
-URL="$($VERCEL "${DEPLOY_ARGS[@]}" | tail -n 1)"
+# When stdout is not a TTY the CLI emits a JSON envelope there and sends
+# human-readable progress (including the production alias) to stderr. Parse the
+# JSON rather than tailing stdout — the last stdout line is just "}".
+err="$(mktemp)"
+trap 'rm -f "$err"' EXIT
+out="$($VERCEL "${DEPLOY_ARGS[@]}" 2>"$err")" || {
+  echo "deploy failed:" >&2
+  sed "s|$VERCEL_TOKEN|<redacted>|g" "$err" >&2
+  exit 1
+}
+
+# Some CLI versions include the scheme in the JSON, some don't; normalize.
+as_url() { local h="${1#https://}"; [[ -n "$h" ]] && printf 'https://%s' "$h"; }
+
+URL="$(as_url "$(printf '%s' "$out" | python3 -c \
+  'import json,sys; print(json.load(sys.stdin)["deployment"]["url"])' 2>/dev/null)")"
+# Fallback for older CLI versions that print a bare URL on stdout.
+[[ -n "$URL" ]] || URL="$(printf '%s' "$out" | grep -Eo 'https://[^ ]+' | tail -n 1)"
+
+# The stable project alias only appears in the human-readable stream.
+ALIAS="$(grep -Eo 'https://[a-z0-9.-]+\.vercel\.app' "$err" | tail -n 1)"
+SITE="${ALIAS:-$URL}"
 
 echo
-echo "deployed: $URL"
+echo "deployment: $URL"
 if [[ $PROD -eq 1 ]]; then
-  echo "gallery:  $URL/"
-  echo "an app:   $URL/apps/<app-id>/"
-  echo "a report: $URL/runs/<run-id>/report.html"
+  echo "gallery:    $SITE/"
+  echo "an app:     $SITE/apps/<app-id>/"
+  echo "a report:   $SITE/runs/<run-id>/report.html"
 else
   echo "(preview deployment — production URL unchanged)"
 fi

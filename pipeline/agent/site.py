@@ -35,23 +35,28 @@ SITE_DIR = REPO_ROOT / "site"
 # own SPA fallback without one app's routes swallowing another's.
 VERCEL_CONFIG: dict[str, Any] = {
     "$schema": "https://openapi.vercel.sh/vercel.json",
-    "trailingSlash": True,
+    # No `trailingSlash`: with it set, a rewrite whose destination ends in
+    # `.html` gets normalized to `…/index.html/` and 404s. Every link we emit
+    # already ends in `/`, and directory indexes resolve without it.
     "rewrites": [
-        {"source": "/apps/:appId/:path*", "destination": "/apps/:appId/index.html"},
+        {"source": "/apps/:appId/(.*)", "destination": "/apps/:appId/index.html"},
     ],
     "headers": [
+        # Order matters: when several rules match, later ones win for the same
+        # header key. The catch-all must come FIRST so the assets rule below can
+        # override it — reversed, every hashed asset silently gets max-age=0.
         {
-            # Vite fingerprints these filenames, so they can be cached forever.
-            "source": "/apps/:appId/assets/:file*",
-            "headers": [
-                {"key": "Cache-Control", "value": "public, max-age=31536000, immutable"},
-            ],
-        },
-        {
-            # Everything else is republished in place and must revalidate.
+            # Republished in place on every deploy, so must revalidate.
             "source": "/(.*)",
             "headers": [
                 {"key": "Cache-Control", "value": "public, max-age=0, must-revalidate"},
+            ],
+        },
+        {
+            # Vite fingerprints these filenames, so they can be cached forever.
+            "source": "/apps/:appId/assets/(.*)",
+            "headers": [
+                {"key": "Cache-Control", "value": "public, max-age=31536000, immutable"},
             ],
         },
     ],
@@ -134,7 +139,14 @@ def build(clean: bool = True) -> Path:
     runs = _load_runs()
 
     if clean and SITE_DIR.exists():
-        shutil.rmtree(SITE_DIR)
+        # Preserve the Vercel project link across rebuilds. Without this, a
+        # re-assemble deletes site/.vercel and the next deploy silently creates
+        # a brand-new project named after the directory ("site") instead of
+        # updating the real one.
+        for entry in SITE_DIR.iterdir():
+            if entry.name == ".vercel":
+                continue
+            shutil.rmtree(entry) if entry.is_dir() else entry.unlink()
     SITE_DIR.mkdir(parents=True, exist_ok=True)
     (SITE_DIR / "vercel.json").write_text(
         json.dumps(VERCEL_CONFIG, indent=2) + "\n", encoding="utf-8"

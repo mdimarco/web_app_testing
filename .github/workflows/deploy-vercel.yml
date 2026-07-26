@@ -87,16 +87,28 @@ jobs:
           scope=()
           [[ -n "$VERCEL_SCOPE" ]] && scope=(--scope "$VERCEL_SCOPE")
 
+          # Link after the site is assembled: assembling replaces site/'s
+          # contents, and an unlinked deploy silently creates a new project
+          # named after the directory instead of updating this one.
           npx --yes vercel@latest link --yes --cwd site \
             --project "$VERCEL_PROJECT" --token "$VERCEL_TOKEN" "${scope[@]}"
 
-          url="$(npx --yes vercel@latest deploy --prod --yes --cwd site \
-            --token "$VERCEL_TOKEN" "${scope[@]}" | tail -n 1)"
+          # Non-TTY stdout is a JSON envelope; the stable alias is on stderr.
+          npx --yes vercel@latest deploy --prod --yes --cwd site \
+            --token "$VERCEL_TOKEN" "${scope[@]}" >deploy.json 2>deploy.log \
+            || { sed "s|$VERCEL_TOKEN|<redacted>|g" deploy.log >&2; exit 1; }
 
-          echo "Deployed to $url"
+          url="https://$(python3 -c \
+            'import json;print(json.load(open("deploy.json"))["deployment"]["url"])' \
+            | sed 's|^https://||')"
+          site="$(grep -Eo 'https://[a-z0-9.-]+\.vercel\.app' deploy.log | tail -n 1)"
+          site="${site:-$url}"
+
+          echo "Deployed to $site"
           {
             echo "### Deployed to Vercel"
             echo
-            echo "- Gallery: $url/"
-            echo "- Apps: \`$url/apps/<app-id>/\`"
+            echo "- Gallery: $site/"
+            echo "- Apps: \`$site/apps/<app-id>/\`"
+            echo "- This deployment: $url"
           } >> "$GITHUB_STEP_SUMMARY"

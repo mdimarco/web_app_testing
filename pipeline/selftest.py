@@ -421,14 +421,17 @@ def test_vercel_config() -> None:
     check("one SPA rewrite per app", len(rewrites) == 1, str(rewrites))
     src, dst = rewrites[0]["source"], rewrites[0]["destination"]
     check("rewrite is scoped to a single app id",
-          src == "/apps/:appId/:path*" and dst == "/apps/:appId/index.html",
+          src == "/apps/:appId/(.*)" and dst == "/apps/:appId/index.html",
           f"{src} -> {dst}")
-    check("rewrite cannot swallow the gallery index", not src.startswith("/(") ,
+    check("rewrite cannot swallow the gallery index", not src.startswith("/(."),
           src)
-    check("trailing slash matches the links we emit",
-          VERCEL_CONFIG.get("trailingSlash") is True)
+    # Verified against real Vercel: `trailingSlash: true` normalizes the
+    # rewrite destination to `…/index.html/`, which 404s every SPA route.
+    check("trailingSlash is not set (it breaks the rewrite destination)",
+          "trailingSlash" not in VERCEL_CONFIG)
 
     headers = VERCEL_CONFIG.get("headers", [])
+    sources = [h["source"] for h in headers]
     immutable = [h for h in headers
                  if any("immutable" in x["value"] for x in h["headers"])]
     check("hashed assets are cached immutably", len(immutable) == 1, str(headers))
@@ -437,6 +440,11 @@ def test_vercel_config() -> None:
     check("everything else must revalidate",
           any(h["source"] == "/(.*)"
               and "must-revalidate" in h["headers"][0]["value"] for h in headers))
+    # Verified against real Vercel: every matching rule applies and the LAST one
+    # wins per header key. Catch-all first, or assets silently get max-age=0.
+    check("catch-all header rule precedes the assets rule",
+          sources.index("/(.*)") < sources.index(immutable[0]["source"]),
+          str(sources))
     check("config is JSON-serializable", bool(json.dumps(VERCEL_CONFIG)))
 
 
