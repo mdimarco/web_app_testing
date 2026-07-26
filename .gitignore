@@ -1,0 +1,20 @@
+# Node
+node_modules/
+dist/
+.vite/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Assembled site — rebuilt by scripts/publish.sh and in CI
+/site/
+
+# Local env
+.env
+.env.local
+
+# OS
+.DS_Store
