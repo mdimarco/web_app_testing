@@ -1,0 +1,170 @@
+@import "tailwindcss";
+
+@import "@fontsource/archivo-black/400.css";
+@import "@fontsource/ibm-plex-sans/400.css";
+@import "@fontsource/ibm-plex-sans/500.css";
+@import "@fontsource/ibm-plex-sans/600.css";
+@import "@fontsource/ibm-plex-mono/400.css";
+@import "@fontsource/ibm-plex-mono/500.css";
+
+@theme {
+  --color-kraft: #F3EDE3;
+  --color-label: #FFFBF4;
+  --color-box: #E7DDCC;
+  --color-ink: #14110E;
+  --color-ink-muted: #6B6152;
+  --color-hairline: #D8CDBB;
+  --color-accent: #FF4A17;
+  --color-panel: #14110E;
+  --color-panel-ink: #F3EDE3;
+  --color-in-stock: #1F6F4A;
+  --color-low: #A96A0B;
+  --color-sold: #B3271A;
+
+  --font-display: "Archivo Black", "Helvetica Neue", Arial, sans-serif;
+  --font-body: "IBM Plex Sans", Helvetica, Arial, sans-serif;
+  --font-mono: "IBM Plex Mono", "SFMono-Regular", Menlo, monospace;
+
+  --radius-std: 2px;
+
+  --breakpoint-sm: 640px;
+  --breakpoint-md: 900px;
+  --breakpoint-lg: 1280px;
+}
+
+:root {
+  color-scheme: light;
+  font-family: var(--font-body);
+  line-height: 1.5;
+  background: var(--color-kraft);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--color-kraft);
+  color: var(--color-ink);
+  overflow-x: hidden;
+}
+
+#root {
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+body {
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Tabular figures everywhere numbers appear */
+.tnum {
+  font-variant-numeric: tabular-nums lining-nums;
+  font-feature-settings: "tnum" 1, "lnum" 1;
+}
+
+/* Focus ring, applied everywhere interactive */
+a, button, input, [tabindex] {
+  outline: none;
+}
+
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--color-ink);
+  outline-offset: 2px;
+}
+
+/* Reveal-on-scroll utility, driven by IntersectionObserver hook */
+.reveal {
+  opacity: 0;
+  transform: translateY(16px);
+  transition: opacity 480ms ease-out, transform 480ms ease-out;
+}
+
+.reveal.is-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reveal {
+    transition: none !important;
+    opacity: 1 !important;
+    transform: none !important;
+  }
+}
+
+/* Horizontal scroll-snap shelf */
+.shelf-scroll {
+  scroll-snap-type: x mandatory;
+  -webkit-overflow-scrolling: touch;
+}
+
+.shelf-card {
+  scroll-snap-align: start;
+}
+
+/* Mobile nav sheet transition */
+.nav-sheet {
+  transition: transform 240ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+.nav-sheet.closing {
+  transition: transform 170ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nav-sheet {
+    transition: opacity 120ms linear !important;
+  }
+}
+
+/* Stamp animation - the one decorative animation */
+@keyframes stamp-in {
+  from {
+    opacity: 0;
+    transform: rotate(-8deg) scale(1.05);
+  }
+  to {
+    opacity: 1;
+    transform: rotate(-3deg) scale(1);
+  }
+}
+
+.stamp {
+  animation: stamp-in 320ms ease-out forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stamp {
+    animation: none !important;
+    transform: none !important;
+    opacity: 1 !important;
+  }
+}
+
+/* Button press */
+.press {
+  transition: transform 90ms ease-out;
+}
+
+.press:active {
+  transform: scale(0.985);
+}
+
+/* Pair card hover */
+.pair-card {
+  transition: transform 120ms ease-out, border-color 120ms ease-out;
+}
+
+.pair-card.hoverable:hover,
+.pair-card.hoverable:focus-within {
+  transform: translateY(-2px);
+  border-color: var(--color-ink);
+}

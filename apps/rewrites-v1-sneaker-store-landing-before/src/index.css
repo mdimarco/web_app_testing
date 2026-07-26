@@ -1,0 +1,109 @@
+@import "tailwindcss";
+@import "@fontsource/anton";
+@import "@fontsource/space-grotesk/400.css";
+@import "@fontsource/space-grotesk/500.css";
+@import "@fontsource/space-grotesk/600.css";
+@import "@fontsource/space-grotesk/700.css";
+
+@theme {
+  --font-display: "Anton", "Arial Narrow", sans-serif;
+  --font-body: "Space Grotesk", "Segoe UI", sans-serif;
+
+  --color-ink: #121210;
+  --color-paper: #f4f1e9;
+  --color-paper-dim: #e6e1d3;
+  --color-lime: #cbff3d;
+  --color-lime-dim: #9fd11f;
+  --color-blaze: #ff5a2d;
+  --color-slate: #7f8478;
+}
+
+:root {
+  color-scheme: dark;
+  font-family: var(--font-body);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--color-ink);
+  color: var(--color-paper);
+}
+
+#root {
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+::selection {
+  background: var(--color-lime);
+  color: var(--color-ink);
+}
+
+:focus-visible {
+  outline: 3px solid var(--color-lime);
+  outline-offset: 3px;
+}
+
+.font-display {
+  font-family: var(--font-display);
+  letter-spacing: 0.01em;
+}
+
+/* diagonal grain / grid backdrop */
+.grid-backdrop {
+  background-image:
+    linear-gradient(rgba(244, 241, 233, 0.055) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(244, 241, 233, 0.055) 1px, transparent 1px);
+  background-size: 44px 44px;
+}
+
+.noise-fade {
+  background: radial-gradient(circle at 30% 20%, rgba(203, 255, 61, 0.16), transparent 55%),
+              radial-gradient(circle at 80% 70%, rgba(255, 90, 45, 0.14), transparent 50%);
+}
+
+@keyframes marquee {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+
+.marquee-track {
+  animation: marquee 26s linear infinite;
+}
+
+.marquee-wrap:hover .marquee-track {
+  animation-play-state: paused;
+}
+
+@keyframes float-slow {
+  0%, 100% { transform: translateY(0) rotate(-8deg); }
+  50% { transform: translateY(-18px) rotate(-4deg); }
+}
+
+.float-slow {
+  animation: float-slow 6s ease-in-out infinite;
+}
+
+@keyframes pop-in {
+  from { opacity: 0; transform: translateY(14px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.pop-in {
+  animation: pop-in 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+input[type="email"]::placeholder {
+  color: rgba(18, 18, 16, 0.45);
+}
