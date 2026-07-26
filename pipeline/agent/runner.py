@@ -223,6 +223,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--force", action="store_true",
                     help="Overwrite existing app directories")
     ap.add_argument("--run-id", default=None)
+    ap.add_argument("--append", action="store_true",
+                    help="Merge into an existing --run-id instead of replacing it")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args(argv)
 
@@ -313,6 +315,28 @@ def main(argv: list[str] | None = None) -> int:
         for p in prompts:
             results.append(task(p))
 
+    # --append lets a run be built up in stages (validate one pair, then add the
+    # rest) while producing a single report. Results are merged by app_id, with
+    # this invocation's results winning.
+    prior: list[dict[str, Any]] = []
+    manifest_path = run_dir / "manifest.json"
+    if args.append and manifest_path.exists():
+        try:
+            existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+            fresh = {r.app_id for r in results}
+            prior = [a for a in existing.get("apps", [])
+                     if a.get("app_id") not in fresh]
+            started = min(started, time.mktime(time.strptime(
+                existing["started_at"][:19], "%Y-%m-%dT%H:%M:%S")))
+        except (json.JSONDecodeError, KeyError, ValueError) as exc:
+            print(f"warning: could not merge prior manifest ({exc}); overwriting",
+                  file=sys.stderr)
+
+    all_apps = prior + [asdict(r) for r in results]
+    # Keep promptset order stable across appends.
+    pset_order = {p.id: i for i, p in enumerate(pset.prompts)}
+    all_apps.sort(key=lambda a: pset_order.get(a.get("prompt_id"), 999))
+
     manifest: dict[str, Any] = {
         "run_id": run_id,
         "promptset": {
@@ -330,14 +354,16 @@ def main(argv: list[str] | None = None) -> int:
         "started_at": datetime.fromtimestamp(started, timezone.utc).isoformat(),
         "finished_at": datetime.now(timezone.utc).isoformat(),
         "duration_seconds": round(time.time() - started, 1),
-        "apps": [asdict(r) for r in results],
+        "apps": all_apps,
         "totals": {
-            "apps": len(results),
-            "ok": sum(1 for r in results if r.status == "ok"),
-            "output_tokens": sum(r.usage.get("output_tokens", 0) for r in results),
-            "input_tokens": sum(r.usage.get("input_tokens", 0) for r in results),
+            "apps": len(all_apps),
+            "ok": sum(1 for a in all_apps if a.get("status") == "ok"),
+            "output_tokens": sum((a.get("usage") or {}).get("output_tokens", 0)
+                                 for a in all_apps),
+            "input_tokens": sum((a.get("usage") or {}).get("input_tokens", 0)
+                                for a in all_apps),
             "estimated_cost_usd": round(
-                sum(r.estimated_cost_usd for r in results), 4
+                sum(a.get("estimated_cost_usd", 0) for a in all_apps), 4
             ),
         },
     }
@@ -348,12 +374,13 @@ def main(argv: list[str] | None = None) -> int:
     report_path = report_mod.write_report(run_dir, manifest)
 
     ok = manifest["totals"]["ok"]
-    print(f"\n{ok}/{len(results)} apps built cleanly")
+    print(f"\n{ok}/{len(all_apps)} apps built cleanly"
+          + (f" (this pass: {len(results)})" if prior else ""))
     print(f"manifest: {run_dir / 'manifest.json'}")
     print(f"report:   {report_path}")
     print("\nNext: ./scripts/deploy_vercel.sh   (assemble site/ and deploy)")
     print("  or: ./scripts/publish.sh --serve  (assemble site/ and serve locally)")
-    return 0 if ok == len(results) else 1
+    return 0 if ok == len(all_apps) else 1
 
 
 if __name__ == "__main__":
