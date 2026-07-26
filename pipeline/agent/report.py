@@ -17,6 +17,7 @@ STATUS_LABEL = {
     "build_failed": ("Build failed", "bad"),
     "agent_failed": ("Agent stopped early", "warn"),
     "error": ("Error", "bad"),
+    "not_generated": ("Never started", "warn"),
 }
 
 CSS = """

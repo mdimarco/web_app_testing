@@ -95,6 +95,25 @@ def scaffold(app_dir: Path, *, force: bool = False) -> None:
             pass
 
 
+def is_template_only(app_dir: Path) -> bool:
+    """True when the agent never meaningfully touched the scaffold.
+
+    A run that dies on its first turn still leaves a workspace that builds and
+    screenshots perfectly — it is just the template. Without this check those
+    appear in the report as successful generations.
+    """
+    src = app_dir / "src"
+    tmpl = TEMPLATE_DIR / "src"
+    if not src.exists():
+        return True
+    app_files = {p.relative_to(src) for p in src.rglob("*") if p.is_file()}
+    tmpl_files = {p.relative_to(tmpl) for p in tmpl.rglob("*") if p.is_file()}
+    if app_files != tmpl_files:
+        return False
+    return all((src / rel).read_bytes() == (tmpl / rel).read_bytes()
+               for rel in app_files)
+
+
 def build_for_deploy(app_dir: Path, base: str, timeout: int = 600) -> tuple[bool, str]:
     """Build the app with the deployment base path baked in."""
     env = {**os.environ, "VITE_BASE": base, "NODE_ENV": "production", "CI": "true"}
@@ -171,6 +190,14 @@ def run_one(
     result.tool_call_counts = loop_result.tool_call_counts
     result.final_message = loop_result.final_text
     result.transcript = str(trace_path.relative_to(run_dir))
+
+    if is_template_only(app_dir):
+        # The scaffold builds and screenshots fine; reporting it as a result
+        # would be a lie about what the agent produced.
+        result.status = "not_generated"
+        result.build_ok = False
+        print("  agent produced nothing — workspace is still the template")
+        return result
 
     # Always attempt the deploy build, even after a bad agent stop — a run that
     # hit max_iterations may still have produced a working app.
